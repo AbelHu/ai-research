@@ -341,7 +341,7 @@ The model API itself is **stateless** (every call re-sends its context). On top 
 ### State, isolation & recovery
 - **Per-job working folder.** Each complex job gets a folder under `Active/Tasks/<request-id>/` or `Active/Features/<request-id>/` (grouped by kind; named by the linked request's id, the user-facing handle) holding its plan, phase/task artifacts, process log, and draft reports. Simple-ask jobs share `Active/Simple/`.
 - **Durable truth = folders + DB.** SQLite holds structured state (requests, jobs, plans, phases, tasks, statuses, memory, index); folders hold artifacts and reports. **All state is recoverable** from folders + DB — a crashed/terminated process is rebuilt from them.
-- **Isolation.** Per-job processes share nothing in memory; they coordinate with the company process over IPC (a task/result queue) and through the DB. A crash in one job can't affect others.
+- **Isolation.** Per-job processes share nothing in memory; they coordinate with the company process over IPC (a **`RoleMessage` task/result queue with an `action` verb — §6D**) and through the DB. A crash in one job can't affect others.
 - **Warm vs durable.** Only **Senior Worker** and **Plan Expert** keep a warm AI session/cache (recoverable as above); all other roles are transient. Either way, **no cache is ever the source of truth** — it is always reconstructable from folders/DB.
 
 ---
@@ -535,6 +535,91 @@ flowchart TD
 
 ---
 
+## 6D. Role I/O Contracts & Message Envelopes
+
+> **Reference:** modeled on **CoC / forge** ([plusplusoneplusplus/shortcuts](https://github.com/plusplusoneplusplus/shortcuts)) — YAML-defined AI pipelines run by a **DAG engine + task queue + process store**, where each step has a **typed input/output** and work is routed between steps by a **verb**. We adopt the same shape for roles: every hand-off is a **typed envelope carrying an `action`**, and every AI-facing role wraps its input in a **versioned prompt template** and parses a **typed response** (the §7 advisor wrapper).
+
+Roles never free-form "chat" to each other. Each hand-off is a **`RoleMessage` envelope** routed through the **Boss** (the router), and each role exposes a fixed **I/O contract** per `action`. This keeps the multi-agent flow **deterministic, queueable, auditable, and recoverable** — exactly like CoC's process store.
+
+### Two layers per hand-off
+1. **Deterministic envelope (role ↔ role).** A `RoleMessage` with an **`action`** verb + a typed `payload`. The **Boss reads the `action`** and schedules the next role (§6B). **The model never sets `action`** — code maps a validated AI verdict to the next verb, keeping AI out of the control path.
+2. **AI sub-call (inside a role).** When a role needs the model, it renders a **versioned template** (`config/templates/<role>.<action>.md`) over its input + retrieved context, then **validates the reply into a pydantic schema** (§7 wrapper). The typed verdict becomes the envelope `payload`; code picks the outgoing `action`.
+
+### The envelope
+```python
+class RoleMessage(BaseModel):
+    id: str
+    request_id: str                 # /req correlation id (§6C)
+    job_id: str | None
+    from_role: Role
+    to_role: Role                   # usually Boss — the deterministic router
+    action: Action                  # validated verb that drives routing (NOT model-set)
+    payload: dict                   # body; schema fixed by (to_role, action)
+    template: str | None            # versioned I/O contract id, e.g. "analyzer.analyze@v3"
+    status: Literal["queued", "in_progress", "done", "failed"]
+    causation_id: str | None        # the message this one answers (trace chain)
+    created_at: datetime
+```
+
+### Action vocabulary (the verbs the Boss routes on)
+| `action` | From → To | Meaning |
+|----------|-----------|---------|
+| `route_request` | PM → Boss | a new/appended request to dispatch (§6C) |
+| `analyze` | Boss → Analyzer | validate association + classify + (complex) plan |
+| `analysis_done` | Analyzer → Boss | verdict (carries one of: `append_rejected` / `ask_clarify` / `answer_ask` / `plan_ready`) |
+| `answer_ask` | Boss → Junior Worker | simple-ask path |
+| `ask_done` | Junior Worker → Boss | validated answer + final-report card |
+| `review_plan` / `review_phase` / `review_final` | Boss → Company Expert | sign-off requests |
+| `approved` / `declined` | Company Expert → Boss | verdict + comments (§6B) |
+| `run_phase` / `run_task` | Boss → Senior Worker | execute work (per-job process) |
+| `task_done` / `phase_done` | Senior Worker → Plan Expert | results for review |
+| `phase_report` / `final_report` | Plan Expert → Boss | assembled report (§9.2) |
+| `archive` | Company Expert → Librarian | commit + move to `Archive/` (§9.2) |
+| `deliver` / `progress` / `clarify` / `undo_append` | Boss → PM | user-facing output / routing fix (§6C) |
+
+### Per-role I/O contract
+"Template" = the versioned AI prompt (none ⇒ deterministic role, no model call). The **AI response schema** is what the model must return; code then sets the **out `action`**.
+
+| Role | In `action` | Input payload | AI template | AI response schema | Out `action` |
+|------|-------------|---------------|-------------|--------------------|--------------|
+| **PM** | (raw inbound) | channel message | `pm.route` *(opt: title + best-guess)* | `RouteGuess{mode:new\|append, candidate_id?, confidence, title?}` | `route_request` |
+| **Boss** | any `*_done` / `route_request` | the envelope | — *(deterministic)* | — | the next verb |
+| **Analyzer** | `analyze` | `RequestCard{request_id,title,text,append?}` + library ctx | `analyzer.analyze` | `Analysis{belongs:bool, kind, clarity, complexity, confidence, rationale, plan?:PlanDraft, clarify?:[str]}` | `analysis_done` |
+| **Junior Worker** | `answer_ask` | `RequestCard` + search hits | `junior.answer` | `AnswerDraft{answer, citations:[Source], confidence}` | `ask_done` |
+| **Company Expert** | `review_*` | plan / phase / final report | `expert.review` | `Verdict{decision:approve\|decline, comments:[str], characters?:[Trait]}` | `approved` / `declined` |
+| **Senior Worker** | `run_task` | `TaskSpec{task_id, goal, deps, catalog}` | `worker.next_action` | `ProposedAction{skill, params, rationale}` (§8.4) | `task_done` / `phase_done` |
+| **Plan Expert** | `phase_done` | task results + provenance | `plan_expert.report` | `PhaseReport` / `FinalReport` (§9.2 schema) | `phase_report` / `final_report` |
+| **Librarian** | `archive` | final report + artifacts | — *(deterministic commit)* | — | `archived` |
+
+> Every payload schema is **pydantic-validated** at the role boundary (like skill params, §8.6); a malformed envelope or AI reply is repaired/retried or escalated, never acted on blindly.
+
+### Templates & storage
+- **Templates folder.** Prompt templates + their response JSON-Schemas live in **`config/templates/`** (`<role>.<action>.md` + `.schema.json`), **versioned** like `config/models/` (§7.0) so prompts evolve without code changes; the `template` field pins the exact version used.
+- **Durable queue / process store.** Envelopes are persisted in a **`role_messages`** table (the inter-role queue + log — §9), so the flow is **recoverable** (rebuild in-flight hand-offs after a crash) and **auditable** (the `causation_id` chain reconstructs who-asked-whom). This is the spec's version of CoC's per-process JSON store + `index.json`.
+- **Maps to existing audit.** A role's AI sub-call still writes an `ai_calls` row (§7); a skill it runs still writes a `steps` row (§8.6). `role_messages` adds the **routing layer** above those.
+
+### Worked trace — "compare three vendors"
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant PM
+  participant BOSS as Boss (router)
+  participant AZ as Analyzer
+  U->>PM: "compare vendors A/B/C and recommend one"
+  PM->>BOSS: RoleMessage{action: route_request,<br/>payload: RequestCard}
+  BOSS->>AZ: RoleMessage{action: analyze, template: analyzer.analyze@v3}
+  Note over AZ: render template over RequestCard + library ctx →<br/>call advisor → validate into Analysis{}
+  AZ->>BOSS: RoleMessage{action: analysis_done,<br/>payload: Analysis{belongs:true, kind:task, plan:…}}
+  Note over BOSS: reads verdict → next verb = review_plan
+  BOSS->>BOSS: schedule Company Expert (review_plan)
+```
+1. **PM** wraps the raw message into a **`RequestCard`** and emits `route_request` to the Boss (auto-assigning the `/req` id, §6C).
+2. **Boss** routes it as `analyze` to the **Analyzer**, pinning template `analyzer.analyze@v3`.
+3. **Analyzer** renders that template over the card + library context, calls the advisor, and **validates the reply into `Analysis{}`**; it returns `analysis_done` to the Boss. Because `belongs:true, kind:task, plan:…`, **code** (not the model) sets the next verb to `review_plan`.
+4. **Boss** schedules the Company Expert — and so on down the action vocabulary, every step a typed, persisted envelope.
+
+---
+
 ## 7. AI Advisor & Provider Abstraction (the "plugin")
 
 A thin, model-agnostic layer. **Model definitions live in a folder** (`config/models/`), one file per model, each naming its provider kind, model id, and the **env var** holding its API token. A separate binding maps **model-roles** (and, optionally, **agent roles**) to those definitions, so each kind of work can use a different swappable model.
@@ -566,7 +651,7 @@ class Advisor:
 ```
 
 **Validation/audit wrapper.** Every advisor call:
-1. Renders a prompt from a versioned template.
+1. Renders a prompt from a **versioned template** (`config/templates/<role>.<action>.md`, §6D).
 2. Calls the provider for the configured **role** (model-role, or per-agent-role override — §7.0).
 3. Parses output into a pydantic schema (structured/JSON mode); on failure → bounded repair/retry → fallback (deterministic default or human question).
 4. Writes an `ai_calls` audit row (role, model id, prompt/response refs, tokens, latency, validation status) — **never the API token** (§12).
@@ -993,6 +1078,7 @@ The **request → job → plan → phase → task** hierarchy (§5, §6B) is mir
 | `plan_tasks` | id, phase_id, parent_task_id (nullable → recursive), title, status(New\|Approved\|InProgress\|Resolved\|Closed\|Abandoned), run_mode(serial\|parallel), depends_on_json, owner_role, created_at *(pause is a job-level flag — see `jobs.paused`)* |
 | `steps` | id, job_id, plan_task_id (nullable for simple-ask jobs), idx, skill_name, params_json, status, result_json, provenance_json, started_at, ended_at *(the "process")* |
 | `agents` | id, job_id (nullable for company roles), role, scope(company\|job), status, pid_or_thread, last_active_at *(role registry — the "employees")* |
+| `role_messages` | id, request_id, job_id (nullable), from_role, to_role, action, payload_json, template (versioned I/O contract id), status(queued\|in_progress\|done\|failed), causation_id (nullable → trace chain), created_at *(the inter-role **envelope** queue + log — §6D; the Boss routes on `action`; durable process store → recovery + audit)* |
 | `ai_calls` | id, job_id, step_id, role, model_id, prompt_ref, response_ref, tokens, latency_ms, validation_status, created_at |
 | `memories` | id, user_id, tenant_id, workspace, kind, entity_key, content, summary, importance, retention_class, confidence, decay_rate, use_count, last_used_at, expires_at, version, superseded_by, state(active\|archived\|dropped), source_ref, created_at, updated_at *(active = hot DB row + index; archived = row kept, excluded from hot index; **dropped → the DB row is deleted**, content retained on disk only, recoverable by full/deep search — §9.1)* |
 | `memory_tags` | memory_id, tag |
@@ -1336,6 +1422,9 @@ Proactive **schedules** are **created on demand — when the user asks for one**
 - **Request title** — an AI-drafted, user-editable name shown in every PM message about a request (§6C).
 - **Progress update** — a PM message (tagged with request id + title) posted at each phase sign-off / major status change (§6C).
 - **Proposal** — an advisor's structured `{skill, params, rationale}` output, subject to validation.
+- **Role message / envelope** — the typed inter-role hand-off (`RoleMessage`) carrying an **`action`** verb + payload, routed through the Boss and persisted in `role_messages`; the model never sets `action` (§6D).
+- **Action (verb)** — the routing value on an envelope (`route_request`, `analyze`, `analysis_done`, `run_task`, `archive`, …) that the Boss schedules on (§6D).
+- **I/O contract / template** — a role's fixed input/output per action: a versioned prompt template (`config/templates/<role>.<action>.md`) + a pydantic response schema (§6D, §7).
 - **Process (record)** — the recorded sequence of steps (skills, params, results, provenance) for a request.
 - **Catalog** — the machine-readable list of skills (name + description + params schema) the advisor may choose from.
 - **Gain** — the retrospective: what went well, what went badly, how to improve; converted to memory/skills.
