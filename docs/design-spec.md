@@ -968,7 +968,7 @@ Everything the AI did (triage label, proposal, draft) was schema-validated and l
   - `data/library/Active/Simple/` — all **simple asks** (shared).
   - `data/library/Active/Tasks/<request-id>/` and `data/library/Active/Features/<request-id>/` — one folder per **in-flight** task / feature job respectively (plan, phase/task artifacts, process log, draft + final reports), grouped by kind.
   - `data/library/Archive/` — finished requests, moved here on completion.
-- **Index file** — an on-disk index (`data/library/index.*`) mapping **keywords/tags/brief descriptions → folder paths**, kept in sync with the DB so the folders are searchable even outside SQLite. *(Keywords/tags/descriptions live in **both** the DB and this index file — DB for important-thing memory, index file for folder search.)*
+- **Index file** — an on-disk index (`data/library/index.*`) mapping **keywords/tags/brief descriptions → folder paths**, kept in sync with the DB so the folders are searchable even outside SQLite. It is the **durable superset**; the **DB index** (`library_index` + `*_fts` + `embeddings`) is the **hot subset**, mirroring only **active/archived** entries. A sibling **`index.dropped.*`** holds entries for **dropped** items — whose **DB rows are deleted** (so the hot index stays small) but whose on-disk copy is retained: excluded from normal/deep DB retrieval, yet consulted on an explicit **full/deep search** or by a feature/improvement job (§9.1). *(Keywords/tags/descriptions live in **both** the DB and the index file while active/archived; on **drop** only the on-disk copy remains.)*
 - **Blob store** — `data/blobs/…` for binary artifacts/attachments referenced by the library.
 
 ### Data model (initial)
@@ -991,11 +991,11 @@ The **request → job → plan → phase → task** hierarchy (§5, §6B) is mir
 | `steps` | id, job_id, plan_task_id (nullable for simple-ask jobs), idx, skill_name, params_json, status, result_json, provenance_json, started_at, ended_at *(the "process")* |
 | `agents` | id, job_id (nullable for company roles), role, scope(company\|job), status, pid_or_thread, last_active_at *(role registry — the "employees")* |
 | `ai_calls` | id, job_id, step_id, role, model_id, prompt_ref, response_ref, tokens, latency_ms, validation_status, created_at |
-| `memories` | id, user_id, tenant_id, workspace, kind, entity_key, content, summary, importance, retention_class, confidence, decay_rate, use_count, last_used_at, expires_at, version, superseded_by, state(active\|archived\|dropped), source_ref, created_at, updated_at |
+| `memories` | id, user_id, tenant_id, workspace, kind, entity_key, content, summary, importance, retention_class, confidence, decay_rate, use_count, last_used_at, expires_at, version, superseded_by, state(active\|archived\|dropped), source_ref, created_at, updated_at *(active = hot DB row + index; archived = row kept, excluded from hot index; **dropped → the DB row is deleted**, content retained on disk only, recoverable by full/deep search — §9.1)* |
 | `memory_tags` | memory_id, tag |
-| `memory_archive` | memory_id, compressed_content, archived_at *(cold store; excluded from the hot index)* |
+| `memory_archive` | memory_id, compressed_content (zip of artifacts **except** the final report), archived_at *(cold store; excluded from the hot index; zip is **non-destructive** — fully restorable on a deep-search read)* |
 | `final_reports` | id, request_id, job_id, keywords_json, tags_json, brief_description, gain_good, gain_bad, gain_improve, improvement_suggestions_json, user_confirmed(bool), spawned_request_id (nullable → improvement job), outcome, artifact_path, created_at *(one per job; sent to the user for confirmation)* |
-| `library_index` | id, request_id, object_type, keywords_json, tags_json, brief_description, folder_path, db_refs_json, created_at *(DB mirror of the on-disk index file → folder search)* |
+| `library_index` | id, request_id, object_type, keywords_json, tags_json, brief_description, folder_path, db_refs_json, created_at *(DB mirror of the on-disk index file → folder search; holds **active/archived** entries only — a **dropped** item's row is **deleted from the DB** and kept on disk in `index.dropped.*` — §9.1)* |
 | `embeddings` | object_type, object_id, vector |
 | `artifacts` | id, job_id, path, mime, created_at |
 | `user_interests` | user_id, topic, weight, source, updated_at *(drives proactive reports)* |
@@ -1032,7 +1032,7 @@ The **request → job → plan → phase → task** hierarchy (§5, §6B) is mir
 
 ### 9.1 Memory weighting, decay, refresh & forgetting
 
-Memory must stay **small, fresh, and useful**. The retention mechanism is a **TTL (time-to-live) clock on every saved item — both memories and tasks**: a background job runs **every 24 hours**, and when an item's TTL expires it is dropped (if unimportant and unreferenced) or archived (if important). **Using/referencing an item resets and extends its TTL**, so things you actually rely on survive and things you don't fade out. An **importance** score sets how long the TTL is and whether expiry means *archive* vs *drop* — **important items are never compressed or dropped**, only archived. The same `importance` also weights retrieval ranking.
+Memory must stay **small, fresh, and useful**. The retention mechanism is a **TTL (time-to-live) clock on every saved item — both memories and tasks**: a background job runs **every 24 hours**, and when an item's TTL expires it is dropped (if unimportant and unreferenced) or archived (if important). **Neither erases content** — *archive* zips the item's artifacts into cold storage (the **final report stays readable**) and *drop* just moves its index entry into a separate **dropped index** (content retained, still recoverable by full/deep search). **Using/referencing an item resets and extends its TTL**, so things you actually rely on survive and things you don't fade out of normal search. An **importance** score sets how long the TTL is and whether expiry means *archive* vs *drop* — **important items are never dropped**, only archived. The same `importance` also weights retrieval ranking.
 
 #### TTL — the retention clock
 - **Everything saved has a TTL.** On write, each memory/task gets `expires_at = now + base_ttl(retention_class, importance)`.
@@ -1041,7 +1041,7 @@ Memory must stay **small, fresh, and useful**. The retention mechanism is a **TT
 - **Net effect (your rule).** “A saved task/memory is dropped if it is not important **and** not referenced within its TTL” — exactly the drop condition; referenced or important items are kept (kept hot, or archived), and the total stays bounded.
 
 #### Per-item attributes
-- `importance ∈ [0,1]` — intrinsic significance (AI-suggested → validated, or explicitly pinned). **Gates destruction.**
+- `importance ∈ [0,1]` — intrinsic significance (AI-suggested → validated, or explicitly pinned). **Gates drop vs archive** (high-importance → archived/recoverable, never dropped).
 - `retention_class ∈ {ephemeral, short, long, core}` — retention policy bucket.
 - `confidence ∈ [0,1]` — for facts that may be wrong/superseded.
 - `last_used_at`, `use_count` — reinforcement signals.
@@ -1051,7 +1051,7 @@ Memory must stay **small, fresh, and useful**. The retention mechanism is a **TT
 
 #### Retention tiers
 
-| Class | Examples | Default TTL | Decay | Compress? | Drop? |
+| Class | Examples | Default TTL | Decay | Consolidate? | Drop? |
 |-------|----------|-------------|-------|-----------|-------|
 | **ephemeral** | today's weather, one-off lookup | hours – 1 day | fast | n/a | yes, on expiry |
 | **short** | recent context, transient detail | days – 2 weeks | medium | merge into summary | yes if low weight & unused |
@@ -1081,9 +1081,9 @@ Facts sharing an `entity_key` form a **version chain**. Writing a conflicting va
 
 #### Consolidation / forgetting job (the daily 24h sweep + on budget pressure)
 Deterministic pipeline run by the **every-24h TTL-maintenance job** (AI only *suggests* summaries, which are validated):
-1. **Expire (TTL)** — any item past `expires_at` that is low-importance & unreferenced → `dropped` (soft-delete, later purged); important ones → `archived` instead.
+1. **Expire (TTL)** — any item past `expires_at` that is low-importance & unreferenced → `dropped` (**DB rows deleted** — `library_index` / `*_fts` / `embeddings` / `memories`; the index entry **moves to the on-disk `dropped` index file**; folder content retained & still **full-/deep-searchable** — *not* purged); important ones → `archived` instead (DB row kept, out of hot index).
 2. **Decay** — recompute `w_eff` for active items; shorten/extend `expires_at` from importance + recent use.
-3. **Archive** — `long` items below `τ_archive` & stale → `archived` to cold store, removed from the hot FTS/vector index (recallable on explicit deep search; **reading an archived item revives it to hot** and refreshes its TTL — see *Reinforcement*).
+3. **Archive** — `long` items below `τ_archive` & stale → `archived` to cold store (**artifacts zipped — every file *except* the `final_report` — removing nothing, fully restorable**), removed from the hot FTS/vector index (recallable on explicit deep search; **reading an archived item revives it to hot** and refreshes its TTL — see *Reinforcement*).
 4. **Consolidate** — cluster near-duplicate `short`/`episodic` items → one validated summary; originals archived/dropped. **`core` is never consolidated.**
 5. **Promote** — sustained high `w_eff`/`use_count` moves `short → long`; `→ core` only by explicit pin.
 6. **Budget enforce** — if the hot index exceeds its soft cap, evict the lowest-`w_eff` **non-core** items (archive medium, drop low) until under cap.
@@ -1092,11 +1092,11 @@ Deterministic pipeline run by the **every-24h TTL-maintenance job** (AI only *su
 
 #### Tiered storage keeps the total bounded
 - **Hot** = `active` items in FTS + vector index → default retrieval.
-- **Cold** = `archived` items, compressed, excluded from the hot index → recalled only on explicit deep search; a **read revives** a cold item back to hot and refreshes its TTL.
-- **Dropped** = soft-deleted, later purged (audit keeps a tombstone reference, not content).
+- **Cold** = `archived` items: their **artifacts are zipped** into cold storage (**all files except the `final_report`, which stays uncompressed and readable**; *compression removes nothing* — the zip is fully restorable) and the entry is excluded from the hot index → recalled on a deep search; a **read revives** a cold item back to hot, unzips on demand, and refreshes its TTL.
+- **Dropped** = **evicted from the DB** — its `library_index` / `*_fts` / `embeddings` / `memories` rows are **deleted** so the hot DB index stays small — while its entry is **moved out of `index.json` into the on-disk `index.dropped.json`** (folder content + zip retained) → excluded from normal *and* deep **DB** retrieval, **but still searchable when the user asks for a full/deep search, or when a feature/improvement job mines past work** (these read the on-disk dropped index + folders, outside SQLite; a hit can **re-import** the item to the DB — revive). Dropping **removes the DB copy, not the data** — nothing on disk is purged except by an explicit user purge or a hard storage cap.
 - **Core** = always hot/pinned, never compressed or dropped.
 
-**Importance gates destruction.** High-importance items may be *archived* (cold) when unused for a very long time, but are never compressed/destroyed; only low-importance, unused, expired items are dropped. This bounds total size while protecting what matters — the index keeps growing slowly, but stays helpful.
+**Importance gates loss.** High-importance items may be *archived* (cold, artifacts zipped) when unused for a very long time, but are **never dropped or destroyed** and revive on read; only low-importance, unused, expired items are **dropped** — moved to the `dropped` index, still recoverable by full/deep search, never auto-erased. This bounds the **hot** index while protecting (and retaining) what matters — nothing is purged except by an explicit user purge or a hard cap.
 
 #### Worked example — "weather in Paris"
 1. Ask "weather in Paris" → write `weather:paris@2026-06-14` (**ephemeral**, TTL ~12h, low importance); and only if it signals where the user *is*, refresh `location:home = Paris` (**long**, higher importance).
@@ -1126,13 +1126,16 @@ data/library/
     Features/                       # Kind:Feature jobs (one folder each)
       <request-id>/...              # same layout as a Task folder (+ generated code/skills)
   Archive/                          # finished requests, moved here on completion
-    <yyyy>/<request-id>/...
+    <yyyy>/<request-id>/            # final_report.md stays readable; rest -> artifacts.zip when cold
+      final_report.md
+      artifacts.zip                 # process log + phases + produced files, zipped (non-destructive)
   index.json                        # keyword/tag/description -> folder path map
+  index.dropped.json                # entries for dropped items (full/deep search + improvement only)
 ```
 - **Folder name = the request id (`/req <id>`, `YYYYMMDDHHmmSS`).** Every request's work — ask, task, or feature — lives in a folder named by its **request id**, the same handle the user sees in chat and the DB, so chat ↔ folder ↔ `requests/jobs/…` rows line up for **traceability + recovery**. The id is **filesystem-safe** (digits only — no colons/spaces) and **sorts chronologically**. Because it has 1-second resolution, code appends a short tie-breaker suffix (`-NN`) when two requests land in the same second, so every folder name stays **unique**. *(Default is one job per request — §5 — so the request id alone names the folder; an **improvement job** is a separate request with its **own** id/folder, linked to its origin via `improves_request_id` in the DB, not by nesting.)*
 - **Simple asks** share `Active/Simple/`; **task** jobs get their own `Active/Tasks/<request-id>/` and **feature** jobs their own `Active/Features/<request-id>/` folder while running.
-- On completion, the **Librarian** moves the folder to `Archive/` and updates the DB + `index.json`.
-- **Dual record (your rule).** Keywords/tags/brief description are written to **both** the **DB** (`final_reports`, `library_index` — the memory of important things) and the **on-disk index file** (`index.json` — the folder search map). Either can answer "have we done something like this before?".
+- On completion, the **Librarian** moves the folder to `Archive/` and updates the DB + `index.json`. When the request later goes **cold** (§9.1), the folder is **compacted**: every file **except `final_report.md`** is zipped into `artifacts.zip` (process log, phases, produced artifacts) — the final report stays readable for search/preview and the zip **removes nothing** (restored on a deep-search read). A **dropped** request's index entry moves to `index.dropped.json`; its folder is kept and stays findable on an explicit full/deep search or for improvement work.
+- **Dual record (your rule).** Keywords/tags/brief description are written to **both** the **DB** (`final_reports`, `library_index` — the memory of important things) and the **on-disk index file** (`index.json` — the folder search map). Either can answer "have we done something like this before?". **On drop, the DB copy is removed and only the on-disk `index.dropped.json` copy remains** (§9.1) — so the DB always reflects the **hot/recoverable** set and the folder keeps the **full** history.
 
 #### Final report format (per request)
 Produced for ask/task/feature; assembled by the Junior Worker (asks) or Plan Expert (tasks/features), validated, then committed by the Librarian:
