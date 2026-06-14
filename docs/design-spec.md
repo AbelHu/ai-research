@@ -301,7 +301,7 @@ flowchart TB
 | **Senior Worker(s)** | Execute **tasks** (`Approved → InProgress → Resolved`); move the owning phase `Active → InProgress`. Multiple may run in parallel for independent tasks. |
 | **Plan Expert** | Reviews task results; when **all** tasks of a phase are done, marks the phase **Resolved**, writes the **phase report**, and **submits it to the Company Expert** for sign-off; assembles the **plan's final report**. Runs **inside the per-job process** and may use a **different model** from the Company Expert. |
 
-> **Role separations (decided).** Junior Worker (fast first-pass triage) and Analyzer (confirm kind + library search + planning) are **separate**. Plan Expert (per-request, in-process review) and Company Expert (company-process sign-off) are **separate** — they run in different processes and can use different model-roles, giving an independent second review.
+> **Role separations (decided).** **PM (first-pass request-routing: auto-assign id, best-guess append-vs-new)** and **Analyzer (authoritative routing validation: confirm or reject the append)** are **separate** — the same first-pass-vs-authoritative split as Junior Worker (fast first-pass triage) vs Analyzer (confirm kind + library search + planning). Plan Expert (per-request, in-process review) and Company Expert (company-process sign-off) are **separate** — they run in different processes and can use different model-roles, giving an independent second review.
 
 ### Role duties at a glance
 
@@ -309,9 +309,9 @@ A one-line duty roster consolidating the roles above with the status-setters of 
 
 | Role | Process | Primary duties | Sets / signs off |
 |------|---------|----------------|------------------|
-| **PM / Gateway** | Company | The **only** role that talks to the user: receive requests, ask clarifications, append details, post progress updates, deliver and confirm the final report, run `/req` commands, surface the device-flow login code, and escalate when the Boss/Expert ask. | — (relays; triggers user-driven pause / abandon) |
-| **Boss** | Company | **Flow + scheduling**: spawn the per-job process on approval, schedule the next action after each decision/user action, set & clear the job's `paused` flag, enforce the **max-3** concurrency cap, terminate the process after archive. | plan `→ InProgress` (spawn); phase `→ Active`; job `paused` on/off |
-| **Analyzer** | Company | Decide **new-request vs append** for an unaddressed message (§6C); classify **kind / clarity / complexity**; search the Library for reuse; draft and revise the **plan → phases → tasks**. | drafts plan/phases/tasks as `New` |
+| **PM / Gateway** | Company | The **only** role that talks to the user. **Auto-assigns a `/req <id>` to every inbound message (first-pass routing: mint-new on an empty queue, else best-guess append-vs-new — §6C)**; receives requests, asks clarifications, appends details, posts progress updates, delivers and confirms the final report, runs `/req` commands, surfaces the device-flow login code, and escalates when the Boss/Expert ask. On an Analyzer reject, **undoes the last append and re-associates** it (≤1). | mints `requests` (id+title) + appends `request_details`; on reject undoes/re-associates |
+| **Boss** | Company | **Flow + scheduling**: dispatch each request to the Analyzer and, on an **append reject**, ask the PM to **undo + re-associate** (bounded by `max_append_reroutes`, default 1; then PM clarifies — §6C); spawn the per-job process on approval, schedule the next action after each decision/user action, set & clear the job's `paused` flag, enforce the **max-3** concurrency cap, terminate the process after archive. | plan `→ InProgress` (spawn); phase `→ Active`; job `paused` on/off; drives append undo/re-route |
+| **Analyzer** | Company | **Validate the PM's append/new association** for a dispatched request — **reject a wrong append** (→ Boss undo/re-route — §6C); classify **kind / clarity / complexity**; search the Library for reuse; draft and revise the **plan → phases → tasks**. | rejects wrong appends; drafts plan/phases/tasks as `New` |
 | **Junior Worker** | Company | Cheap **first-pass triage** on intake; handle **simple asks** end-to-end (search + validated answer); assemble the ask's final report. | — (ask path; no plan) |
 | **Company Expert** | Company | **Approve/decline plans**; sign off completed **phases** and the **final report**; review Junior Worker output; extract user characters for archival. | plan `Approved` / `Resolved`; phase `Closed` or `→ Active` (decline); task `Closed` |
 | **Librarian** | Company | **Sole writer** of the archive + DB: commit `final_reports`, `library_index`, `memory*`, move folders to `Archive/`, keep `index.json` in sync. | plan `Closed` (after archive) |
@@ -467,16 +467,30 @@ The user can **send a new request while others are still running**. The PM multi
 - The `/req <id>` + title appear in **every PM message about that request** (acknowledgement, clarifications, progress updates, final delivery) and are searchable in the library.
 - A request is **linked to its job** (§5); details the user adds later **append to the request** and flow into that job. Simple-ask requests also get an id but are usually answered immediately (no progress stream).
 
-### Routing inbound messages (new vs. existing)
-When a message arrives, the system decides whether it **starts a new request** or **adds to an existing one**:
-1. **Explicit address (deterministic).** The message targets a request: it starts with **`/req <id> …`**, or is a reply/thread to a prior PM message about it. → routed to that request's job as **appended detail/instruction**; no AI needed.
-2. **Focused request (deterministic).** If the user ran **`/req <id>`** to focus it (or the last exchange was about it) and the message has no new-request markers, it continues that request.
-3. **No id / no marker → Analyzer disambiguates.** When nothing addresses a request, the message is **not** assumed new. The **Analyzer** compares it against the user's **open and recent requests** (semantic similarity + recency + whether any request is **awaiting the user's answer**) and labels it **`append → /req <id>`** or **`new request`** with a confidence score + rationale:
-   - **Confident append →** route it to that request's job as appended detail (may pause → update plan → resume, below).
-   - **Confident new →** mint a **new request** (new id + title); the Analyzer then turns it into a job.
-   - **Ambiguous (low confidence / multiple candidates) →** the **PM asks a one-line** "is this part of `/req <id>` «*title*» or a new request?" rather than guessing.
+### Routing inbound messages (PM first-pass → Analyzer validation)
+**Every inbound message is attached to a request immediately, then re-checked before planning** — a cheap **PM first-pass** assignment on intake, validated by an **authoritative Analyzer** check after the Boss dispatches it. (Same two-tier idea as Junior-Worker triage vs. Analyzer classification — §6A.)
 
-This keeps AI out of the control path: the Analyzer only **advises** the new-vs-append label; deterministic code applies the confident cases and defers to the user (via the PM) when unsure. A **pending clarifying question** strongly biases the next unaddressed message toward **append** to the request that asked.
+**Stage 1 — PM first-pass (on intake, fast).** The PM gives **every** message a home so nothing is left unaddressed, and **auto-assigns a `/req <id>`**:
+1. **Explicit address (deterministic).** Starts with **`/req <id> …`**, or is a reply/thread to a prior PM message about a request → **append** to that request; no AI.
+2. **Focused request (deterministic).** If the user ran **`/req <id>`** to focus it (or the last exchange was about it) with no new-request markers → continue that request.
+3. **Empty queue (deterministic).** **No open requests** → the message can only be new → PM **mints a new request** (new `/req <id>` + title).
+4. **Open requests, no explicit address → PM best-guess.** The PM compares the message against open/recent requests (semantic similarity + recency + any request **awaiting the user's answer**) and **either appends** it to the best match **or mints a new request**, recording the chosen target + candidate + confidence on the append. The PM **doesn't block** — the guess is provisional and validated in Stage 2. (A **pending clarifying question** strongly biases toward **append** to the asking request.)
+
+The PM acknowledges with the resolved **`/req <id>` + title** so the user can correct a mis-route at once.
+
+**Stage 2 — Analyzer validation (after Boss dispatch, authoritative).** The Boss dispatches the request to the **Analyzer**, which **re-checks whether the appended message truly belongs** before any planning:
+- **Confirmed →** proceed: classify **kind / clarity / complexity**, search the Library, and (for complex jobs) draft/update the plan.
+- **Rejected (wrong association) →** the Analyzer **rejects the append**; the **Boss asks the PM to undo the last append** (detach it) and **re-associate** the message with the correct target (an existing request or a new one). The re-routed message is dispatched again for validation. **Bounded retry: `max_append_reroutes` (default 1).**
+- **Still wrong after the retry (or no confident target) →** the **PM asks the user to clarify** ("is this part of `/req <id>` «*title*» or a new request?"); the user's answer is authoritative.
+
+This keeps AI out of the control path: the PM's first-pass and the Analyzer's validation only **advise** the new-vs-append label; **deterministic code** applies the confident cases, bounds the retry, and **defers to the user** when both passes disagree or stay unsure.
+
+#### Undo & reject tracking — no new `requests` column (decision)
+**We do *not* add a property to `requests` to track the reject.** What gets rejected/undone is the **append**, which is a `request_details` row — so its lifecycle is tracked **there**, and the reject is an **event** in `audit_log`:
+- **Wrong append** → set the offending `request_details.state = rejected` (or `reassigned`) and write a fresh `active` detail under the correct request — that *is* “undo last append + re-associate”.
+- **Wrongly-minted new request** (PM guessed *new*, Analyzer says *append*) → drop it via the **existing** `requests.state = dropped`; still no new column.
+- **Audit** → one `audit_log` row per reject (`actor = analyzer`, `action = reject_append`, `target = detail/request`), so the trail survives without mutable flags on `requests`.
+- **Retry bound (max 1)** → routing-control state owned by the Boss for the in-flight handshake; persisted as `request_details.reroute_count` only so a mid-reroute restart is recoverable.
 
 ### Delivering details to the right request
 - New details for a running complex job are queued to **that job's process** (its `Active/<kind>/<request-id>/` folder + inbox); the Boss **pauses the job** (`paused`), has the **Analyzer** add/update phases & tasks, then **resumes** — under the normal plan/sign-off rules (no mid-flight corruption).
@@ -499,17 +513,21 @@ The user can act on any job at any time via the PM:
 
 ```mermaid
 flowchart TD
-  IN[Inbound message] --> R{Addresses an existing request?}
-  R -->|"/req id ... or reply"| EX[Append detail to that request's job]
-  R -->|"focused via /req id"| EX
-  R -->|no markers| DIS{"Analyzer: append to an open<br/>request or a new request?"}
-  DIS -->|append - confident| EX
-  DIS -->|new - confident| NEW[Mint new request: id + title]
-  DIS -->|ambiguous| ASK[PM asks: part of /req id or new?]
-  ASK -->|user replies| R
-  NEW --> AZ[Analyzer: request -> job kind]
-  EX --> ACKD[PM confirms applied to request id + title]
-  AZ --> ROUTE[Simple ask -> Junior Worker answers; task/feature -> plan + per-job process]
+  IN[Inbound message] --> PM1{"PM first-pass: addresses<br/>an existing request?"}
+  PM1 -->|"/req id, reply, or focused"| EX[PM appends detail to that request]
+  PM1 -->|"empty queue"| NEW[PM mints new request: id + title]
+  PM1 -->|"open requests, no marker"| GUESS{"PM best-guess:<br/>append vs new"}
+  GUESS -->|append| EX
+  GUESS -->|new| NEW
+  EX --> ACKD[PM acks: /req id + title]
+  NEW --> ACKD
+  ACKD --> DISP[Boss dispatches to Analyzer]
+  DISP --> VAL{"Analyzer: does the message<br/>truly belong here?"}
+  VAL -->|confirmed| AZ[Analyzer: classify kind + plan]
+  VAL -->|"rejected (retries left, max 1)"| UNDO[Boss: PM undoes last append + re-associates] --> DISP
+  VAL -->|"rejected (retries exhausted)"| ASK[PM asks user: which request?]
+  ASK -->|user replies| PM1
+  AZ --> ROUTE[Simple ask -> Junior Worker; task/feature -> plan + per-job process]
 ```
 
 > Concurrency is bounded and deterministic: ids/titles are assigned by code, routing decisions are validated, and each job's state lives in its own `Active/<kind>/<request-id>/` folder + DB rows — so parallel jobs never share working state, and the user can always tell them apart.
@@ -965,7 +983,7 @@ The **request → job → plan → phase → task** hierarchy (§5, §6B) is mir
 | `sessions` | id, user_id, channel, status, started_at |
 | `messages` | id, session_id, direction, content, raw_json, created_at |
 | `requests` | id, code (`YYYYMMDDHHmmSS`, addressed as `/req <id>`), session_id, user_id, tenant_id, workspace, channel, title (AI-drafted, user-editable), status, improves_request_id (nullable → links an improvement request to its origin), importance, use_count, last_used_at, expires_at, state(active\|archived\|dropped), created_at *(user-facing envelope; `code`+`title` multiplex concurrent requests; carries a TTL)* |
-| `request_details` | id, request_id, content, source(user\|pm), created_at *(extra info appended after intake — §5; may trigger plan updates)* |
+| `request_details` | id, request_id, content, source(user\|pm), routed_by(pm\|analyzer), confidence, state(active\|rejected\|reassigned, default active), reroute_count(default 0), created_at *(extra info appended after intake — §5; PM first-pass appends, Analyzer validates; a wrong append → `state` rejected/reassigned + a fresh `active` row under the correct request — §6C; reject event also in `audit_log`; **no new `requests` column needed**)* |
 | `jobs` | id, request_id, kind(ask\|task\|feature), clarity, complexity, folder_path, paused(bool, default false), paused_at (nullable), created_at *(unit of work, one per request; **no status of its own** — a complex job's lifecycle is its **plan**'s status (1:1), an ask is a one-shot tracked by its request; `paused` suspends the job — §6B)* |
 | `plans` | id, job_id, status(New\|Approved\|InProgress\|Resolved\|Closed\|Abandoned), approved_by, resolved_by, closed_by, created_at |
 | `phases` | id, plan_id, idx, title, status(New\|Approved\|Active\|InProgress\|Resolved\|Closed\|Abandoned), decline_count, report_ref, resolved_by, signed_off_by, created_at |
@@ -1097,7 +1115,7 @@ Every request — **ask, task, or feature** — produces a **final report** and 
 data/library/
   Active/                           # all in-flight work, grouped by kind
     Simple/                         # all simple asks (shared)
-      <ask-id>/                     # request log + final report
+      <request-id>/                 # request log + final report
     Tasks/                          # Kind:Task jobs (one folder each)
       <request-id>/
         plan.json                   # plan -> phases -> tasks (mirrors DB)
@@ -1111,6 +1129,7 @@ data/library/
     <yyyy>/<request-id>/...
   index.json                        # keyword/tag/description -> folder path map
 ```
+- **Folder name = the request id (`/req <id>`, `YYYYMMDDHHmmSS`).** Every request's work — ask, task, or feature — lives in a folder named by its **request id**, the same handle the user sees in chat and the DB, so chat ↔ folder ↔ `requests/jobs/…` rows line up for **traceability + recovery**. The id is **filesystem-safe** (digits only — no colons/spaces) and **sorts chronologically**. Because it has 1-second resolution, code appends a short tie-breaker suffix (`-NN`) when two requests land in the same second, so every folder name stays **unique**. *(Default is one job per request — §5 — so the request id alone names the folder; an **improvement job** is a separate request with its **own** id/folder, linked to its origin via `improves_request_id` in the DB, not by nesting.)*
 - **Simple asks** share `Active/Simple/`; **task** jobs get their own `Active/Tasks/<request-id>/` and **feature** jobs their own `Active/Features/<request-id>/` folder while running.
 - On completion, the **Librarian** moves the folder to `Archive/` and updates the DB + `index.json`.
 - **Dual record (your rule).** Keywords/tags/brief description are written to **both** the **DB** (`final_reports`, `library_index` — the memory of important things) and the **on-disk index file** (`index.json` — the folder search map). Either can answer "have we done something like this before?".
