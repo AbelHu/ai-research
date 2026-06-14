@@ -21,5 +21,10 @@ node_modules/
 dist/
 build/
 
+# Vendored offline wheel cache (large, platform-specific binaries).
+# Not pushed to the remote; rebuild locally with scripts/fetch-wheels.sh
+# (downloads the exact, hash-pinned versions from backend/requirements.lock).
+vendor/wheels/
+
 # Editor / OS
 .DS_Store

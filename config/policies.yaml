@@ -1,0 +1,27 @@
+# Policy knobs - the single source of truth for tunable limits and behavior.
+# Deterministic code reads these; the AI never sets them. See docs/design-spec.md
+# (§6B improvement loop, §6C routing, §6A roles) and the implementation plan T0.5.
+#
+# Loaded + validated by app/config/policies.py. Every key here must match a
+# field on the `Policies` model (unknown keys are rejected, so typos surface
+# immediately).
+
+# Max times a phase plan may be declined by the Company Expert before the job
+# escalates instead of looping again (§6B).
+max_phase_declines: 3
+
+# Max improvement iterations on a delivered job before it is force-closed (§6B).
+max_improvement_iterations: 2
+
+# Max times an append to an existing request may be re-routed before the
+# Analyzer rejects it and mints a new request (§6C).
+max_append_reroutes: 1
+
+# Max complex jobs running concurrently; a paused job still holds its slot.
+max_concurrent_jobs: 3
+
+# Idle minutes before a Junior Worker's warm ask session is retired (§6A).
+junior_session_idle_minutes: 15
+
+# How often progress is surfaced to the user: "none" | "phase" | "task".
+progress_updates: phase

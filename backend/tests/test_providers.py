@@ -1,0 +1,182 @@
+"""Provider transport tests (implementation-plan T0.6 / T0.7, design-spec §7, §12).
+
+We exercise `OpenAICompatibleProvider` against an `httpx.MockTransport` so the
+real request-building path runs (headers, JSON body, URL) but nothing touches
+the network. This locks:
+  * the outbound `/chat/completions` request/response shape, and
+  * that the redaction guard scrubs secrets before they leave the machine.
+
+The autouse `_no_network` guard in conftest additionally guarantees no real
+socket is opened.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+
+import httpx
+import pytest
+
+from app.advisor.providers import (
+    CompletionRequest,
+    EmbedRequest,
+    OpenAICompatibleProvider,
+)
+from app.advisor.redaction import SecretLeakError
+
+Handler = Callable[[httpx.Request], httpx.Response]
+
+
+def _install_mock_transport(
+    monkeypatch: pytest.MonkeyPatch, handler: Handler
+) -> dict[str, httpx.Request]:
+    """Patch httpx.Client so every request goes through `handler` (no network).
+
+    Returns a dict that captures the last request the provider sent.
+    """
+    captured: dict[str, httpx.Request] = {}
+    real_client = httpx.Client
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return handler(request)
+
+    def factory(*_args: object, **_kwargs: object) -> httpx.Client:
+        # Drop timeout/base kwargs; route through the mock transport instead.
+        return real_client(transport=httpx.MockTransport(_record))
+
+    monkeypatch.setattr(httpx, "Client", factory)
+    return captured
+
+
+def _chat_handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": "pong"}}],
+            "model": "server-reported-model",
+        },
+    )
+
+
+def _make_provider() -> OpenAICompatibleProvider:
+    return OpenAICompatibleProvider(
+        base_url="https://api.example.com/v1",
+        model="test-model",
+        api_key="sk-not-a-real-key-1234567890",
+    )
+
+
+def test_complete_request_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _install_mock_transport(monkeypatch, _chat_handler)
+    provider = _make_provider()
+
+    resp = provider.complete(
+        CompletionRequest(
+            messages=[{"role": "user", "content": "ping"}],
+            temperature=0.5,
+            max_tokens=16,
+            response_format={"type": "json_object"},
+        )
+    )
+
+    req = captured["request"]
+    assert req.method == "POST"
+    assert str(req.url) == "https://api.example.com/v1/chat/completions"
+    assert req.headers["Content-Type"] == "application/json"
+    assert req.headers["Authorization"] == "Bearer sk-not-a-real-key-1234567890"
+
+    body = json.loads(req.content)
+    assert body["model"] == "test-model"
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["temperature"] == 0.5
+    assert body["max_tokens"] == 16
+    assert body["response_format"] == {"type": "json_object"}
+
+    # Response is parsed into the typed shape.
+    assert resp.text == "pong"
+    assert resp.model == "test-model"
+    assert resp.raw["choices"][0]["message"]["content"] == "pong"
+
+
+def test_complete_omits_optional_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _install_mock_transport(monkeypatch, _chat_handler)
+    provider = _make_provider()
+
+    provider.complete(CompletionRequest(messages=[{"role": "user", "content": "hi"}]))
+
+    body = json.loads(captured["request"].content)
+    assert "max_tokens" not in body
+    assert "response_format" not in body
+    assert body["temperature"] == 0.2  # default
+
+
+def test_complete_no_auth_header_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _install_mock_transport(monkeypatch, _chat_handler)
+    provider = OpenAICompatibleProvider(
+        base_url="http://localhost:11434/v1",
+        model="llama3.1:8b",
+    )
+
+    provider.complete(CompletionRequest(messages=[{"role": "user", "content": "hi"}]))
+
+    assert "Authorization" not in captured["request"].headers
+
+
+def test_complete_redacts_secret_in_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _install_mock_transport(monkeypatch, _chat_handler)
+    provider = _make_provider()
+
+    planted = "ghp_0123456789abcdefghijklmnopqrstuvwxyz12"
+    provider.complete(
+        CompletionRequest(messages=[{"role": "user", "content": f"my pat is {planted}"}])
+    )
+
+    raw_body = captured["request"].content.decode()
+    assert planted not in raw_body, "secret must not leave the machine"
+    assert "[REDACTED]" in raw_body
+
+
+def _embed_handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "data": [
+                {"embedding": [0.1, 0.2, 0.3]},
+                {"embedding": [0.4, 0.5, 0.6]},
+            ],
+            "model": "server-reported-embed",
+        },
+    )
+
+
+def test_embed_request_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _install_mock_transport(monkeypatch, _embed_handler)
+    provider = _make_provider()
+
+    resp = provider.embed(EmbedRequest(texts=["hello", "world"]))
+
+    req = captured["request"]
+    assert req.method == "POST"
+    assert str(req.url) == "https://api.example.com/v1/embeddings"
+    body = json.loads(req.content)
+    assert body["model"] == "test-model"
+    assert body["input"] == ["hello", "world"]
+
+    assert resp.vectors == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+    assert resp.model == "test-model"
+
+
+def test_embed_redacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A planted secret must never reach the /embeddings request body. Embedding
+    # inputs strict-block (raise) rather than scrub in place.
+    captured = _install_mock_transport(monkeypatch, _embed_handler)
+    provider = _make_provider()
+
+    planted = "ghp_0123456789abcdefghijklmnopqrstuvwxyz12"
+    with pytest.raises(SecretLeakError):
+        provider.embed(EmbedRequest(texts=["clean text", f"leak {planted}"]))
+
+    # No request was sent at all, so the secret never left the machine.
+    assert "request" not in captured

@@ -20,11 +20,19 @@ from typing import Protocol
 
 import httpx
 
-from app.advisor.redaction import redact_messages
+from app.advisor.redaction import ensure_no_secrets, redact_messages
+from app.security import Secret
 
 # GitHub Models endpoints (verified against the GitHub Models REST API).
 GITHUB_MODELS_HOST = "https://models.github.ai"
 GITHUB_MODELS_API_VERSION = "2026-03-10"
+
+
+def _as_secret(value: Secret | str | None) -> Secret | None:
+    """Normalize an API key into a `Secret` (or None) so it cannot leak."""
+    if value is None or isinstance(value, Secret):
+        return value
+    return Secret(value)
 
 
 @dataclass
@@ -71,20 +79,21 @@ class OpenAICompatibleProvider:
         *,
         base_url: str,
         model: str,
-        api_key: str | None = None,
+        api_key: Secret | str | None = None,
         extra_headers: dict | None = None,
         timeout: float = 60.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self._api_key = api_key
+        self._api_key = _as_secret(api_key)
         self._extra_headers = extra_headers or {}
         self._timeout = timeout
 
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json", **self._extra_headers}
         if self._api_key:
-            headers.setdefault("Authorization", f"Bearer {self._api_key}")
+            # reveal() is the single boundary where the real token is used.
+            headers.setdefault("Authorization", f"Bearer {self._api_key.reveal()}")
         return headers
 
     def complete(self, req: CompletionRequest) -> CompletionResponse:
@@ -108,14 +117,14 @@ class OpenAICompatibleProvider:
             resp.raise_for_status()
             data = resp.json()
 
-        text = (
-            data.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         return CompletionResponse(text=text, model=self.model, raw=data)
 
     def embed(self, req: EmbedRequest) -> EmbedResponse:
+        # O16/§12: never embed text that contains secrets. Unlike chat content,
+        # an embedding input cannot be safely scrubbed in place (a redacted
+        # string yields a meaningless vector), so we strict-block instead.
+        ensure_no_secrets(req.texts)
         with httpx.Client(timeout=self._timeout) as client:
             resp = client.post(
                 f"{self.base_url}/embeddings",
@@ -136,7 +145,7 @@ class GitHubModelsProvider(OpenAICompatibleProvider):
     tracked against your enterprise organization.
     """
 
-    def __init__(self, *, token: str, model: str, org: str | None = None) -> None:
+    def __init__(self, *, token: Secret | str, model: str, org: str | None = None) -> None:
         if org:
             base_url = f"{GITHUB_MODELS_HOST}/orgs/{org}/inference"
         else:
@@ -163,20 +172,18 @@ def build_provider(provider_cfg, *, getenv=os.getenv) -> AIProvider:
     if kind == "github_models":
         token = getenv(provider_cfg.api_key_env or "GITHUB_MODELS_TOKEN")
         if not token:
-            raise MissingCredentialError(
-                provider_cfg.api_key_env or "GITHUB_MODELS_TOKEN"
-            )
+            raise MissingCredentialError(provider_cfg.api_key_env or "GITHUB_MODELS_TOKEN")
         org = getenv(provider_cfg.org_env) if provider_cfg.org_env else None
-        return GitHubModelsProvider(token=token, model=provider_cfg.model, org=org or None)
+        return GitHubModelsProvider(token=Secret(token), model=provider_cfg.model, org=org or None)
 
     if kind == "openai_compatible":
         if not provider_cfg.base_url:
             raise ValueError("openai_compatible provider requires `base_url`")
-        api_key = getenv(provider_cfg.api_key_env) if provider_cfg.api_key_env else None
+        raw_key = getenv(provider_cfg.api_key_env) if provider_cfg.api_key_env else None
         return OpenAICompatibleProvider(
             base_url=provider_cfg.base_url,
             model=provider_cfg.model,
-            api_key=api_key,
+            api_key=Secret(raw_key) if raw_key else None,
         )
 
     if kind == "ollama":

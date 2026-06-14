@@ -78,21 +78,21 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 > Goal: a clean, validated baseline so every later step has a test to run.
 
-- [ ] **T0.1 — Add the test harness.** Create `backend/tests/` with `conftest.py` and one trivial `test_smoke.py`. Wire `pytest` config in `pyproject.toml`.
+- [x] **T0.1 — Add the test harness.** Create `backend/tests/` with `conftest.py` and one trivial `test_smoke.py`. Wire `pytest` config in `pyproject.toml`.
   - *Validate:* `python -m pytest -q` → 1 passed.
-- [ ] **T0.2 — Add ruff (lint + format) config.** Add `ruff` to dev deps + config; fix any existing findings.
+- [x] **T0.2 — Add ruff (lint + format) config.** Add `ruff` to dev deps + config; fix any existing findings.
   - *Validate:* `python -m ruff check .` and `python -m ruff format --check .` → clean.
-- [ ] **T0.3 — Characterize redaction with tests.** Add `tests/test_redaction.py` covering each rule (PAT, openai key, bearer, secret-assignment, connection string, private key) + a "no false-positive on normal prose" case.
+- [x] **T0.3 — Characterize redaction with tests.** Add `tests/test_redaction.py` covering each rule (PAT, openai key, bearer, secret-assignment, connection string, private key) + a "no false-positive on normal prose" case.
   - *Validate:* `python -m pytest tests/test_redaction.py -q`.
-- [ ] **T0.4 — Characterize config loading with tests.** Add `tests/test_settings.py` for `load_models_config` + `provider_for_role` (valid + unknown-role + unknown-provider).
+- [x] **T0.4 — Characterize config loading with tests.** Add `tests/test_settings.py` for `load_models_config` + `provider_for_role` (valid + unknown-role + unknown-provider).
   - *Validate:* `python -m pytest tests/test_settings.py -q`.
-- [ ] **T0.5 — Add `config/policies.yaml` + typed loader.** Single source for knobs (`max_phase_declines: 3`, `max_improvement_iterations: 2`, `max_append_reroutes: 1`, `max_concurrent_jobs: 3`, `junior_session_idle_minutes: 15`, `progress_updates: phase`). Loader in `app/config/policies.py`.
+- [x] **T0.5 — Add `config/policies.yaml` + typed loader.** Single source for knobs (`max_phase_declines: 3`, `max_improvement_iterations: 2`, `max_append_reroutes: 1`, `max_concurrent_jobs: 3`, `junior_session_idle_minutes: 15`, `progress_updates: phase`). Loader in `app/config/policies.py`.
   - *Validate:* `tests/test_policies.py` asserts defaults load + override works.
-- [ ] **T0.6 — Provider unit test with a fake transport.** Test `OpenAICompatibleProvider.complete` against a mocked `httpx` (no network) to lock the request/response shape + that redaction is applied.
+- [x] **T0.6 — Provider unit test with a fake transport.** Test `OpenAICompatibleProvider.complete` against a mocked `httpx` (no network) to lock the request/response shape + that redaction is applied.
   - *Validate:* `python -m pytest tests/test_providers.py -q`.
-- [ ] **T0.7 — Redact embedding inputs (security).** `embed()` currently posts texts **unredacted** (`providers.py`); route embedding inputs through the redaction guard (strict-block on a hit) before they leave the machine — closes the "never send secrets to any AI model" gap (§12) **ahead of P5.2**.
+- [x] **T0.7 — Redact embedding inputs (security).** `embed()` currently posts texts **unredacted** (`providers.py`); route embedding inputs through the redaction guard (strict-block on a hit) before they leave the machine — closes the "never send secrets to any AI model" gap (§12) **ahead of P5.2**.
   - *Validate:* `tests/test_providers.py::test_embed_redacts` — a planted secret never appears in the captured `/embeddings` request body.
-- [ ] **T0.8 — Deterministic `verify --dry-run` (config-only).** Add a **no-network** mode to `app.cli.verify` that checks config + role→provider mapping + token presence **without calling GitHub**; the **live** completion check becomes explicit opt-in (`--live`, manual smoke only). Keeps CI/test runs offline (open decision #5).
+- [x] **T0.8 — Deterministic `verify --dry-run` (config-only).** Add a **no-network** mode to `app.cli.verify` that checks config + role→provider mapping + token presence **without calling GitHub**; the **live** completion check becomes explicit opt-in (`--live`, manual smoke only). Keeps CI/test runs offline (open decision #5).
   - *Validate:* `python -m app.cli.verify --dry-run` exits 0 with a stubbed env; `tests/test_verify_dryrun.py` (no network).
 - ✅ **Checkpoint P0** — baseline green: tests + lint + `verify --dry-run` pass with **no network**; the live `--live` smoke is optional/manual.
 

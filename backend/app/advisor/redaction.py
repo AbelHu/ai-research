@@ -16,7 +16,23 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-REDACTED = "[REDACTED]"
+from app.security import REDACTED  # re-exported: app.advisor.redaction.REDACTED still works
+
+
+class SecretLeakError(RuntimeError):
+    """Raised when text containing secrets would be sent to a model.
+
+    Used where redaction-in-place is not safe (e.g. embedding inputs, where a
+    partially-redacted string would produce a meaningless vector). The matched
+    rule *labels* are reported, never the secret values themselves.
+    """
+
+    def __init__(self, labels: list[str]) -> None:
+        self.labels = sorted(set(labels))
+        super().__init__(
+            "Refusing to send text containing secrets to a model "
+            f"(matched rules: {', '.join(self.labels)})."
+        )
 
 
 @dataclass(frozen=True)
@@ -89,7 +105,8 @@ def redact_text(text: str) -> str:
         return text
     result = text
     for rule in _RULES:
-        def _replace(match: re.Match[str]) -> str:
+
+        def _replace(match: re.Match[str], rule: _Rule = rule) -> str:
             if rule.group:
                 whole = match.group(0)
                 secret = match.group(rule.group)
@@ -110,3 +127,16 @@ def redact_messages(messages: list[dict]) -> list[dict]:
             new_msg["content"] = redact_text(content)
         redacted.append(new_msg)
     return redacted
+
+
+def ensure_no_secrets(texts: list[str]) -> None:
+    """Strict guard: raise `SecretLeakError` if any text contains a secret.
+
+    For payloads that must not be sent at all when a secret is present (e.g.
+    embedding inputs), as opposed to `redact_text`, which scrubs in place.
+    """
+    labels: list[str] = []
+    for text in texts:
+        labels.extend(label for label, _ in find_secrets(text))
+    if labels:
+        raise SecretLeakError(labels)
