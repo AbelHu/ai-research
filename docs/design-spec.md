@@ -40,7 +40,7 @@ validated and audited before any action is taken.
 | Frontend | **FastAPI REST + lightweight React/TS** (Vite); built later (chat first) |
 | Memory/search | **Hybrid**: SQLite **FTS5** + **in-SQLite vector (`sqlite-vec`)**; per-task **cards** (keywords + tags + short description) |
 | AI providers | **Provider abstraction**; **model definitions in a folder** (`config/models/`), tokens from env. **Login via OAuth device flow** to **GitHub Copilot** (well-known client ID, **no app registration** — per OpenClaw/Hermes); **GitHub Models PAT** / OpenAI / Azure / Ollama swappable. Per-role model assignment is **auth/endpoint only — no shared skills/memory** (§7/§7.2). |
-| Web/live search | **Bing Web Search API** via a deterministic `web.search` skill (GitHub Models has no native web-search tool); anti-crawl-aware |
+| Web/live search | **Bing Web Search API** via a deterministic `web.search` skill (the current GitHub-backed providers don't expose native web search); anti-crawl-aware |
 | Secrets | **Env variables are secrets**: never written to logs, never sent to any AI model in a request, never shown to the user. Secret redaction guard before every model call/log/reply; **PII not redacted**. |
 | Vocabulary | **Request** (what the user sends) → **Job** (created by the Analyzer, carries the **kind**: ask / task / feature) → **Plan** (for complex jobs). task + feature = a **complex job** (§5). |
 | Orchestration | **Role-based multi-agent**: one long-running **company** process (PM, Boss, Analyzer, Junior Worker, Company Expert, Librarian as threads) + a **per-job process** (Senior Workers + Plan Expert) spawned on plan approval (§6A). |
@@ -364,7 +364,7 @@ For a **task** or **feature** job, the Analyzer produces a **plan**:
 **Pause is a job-level flag, not a status.** The **job** carries a boolean **`paused`** (with `paused_at`); setting it suspends the whole job — its plan, phases, and tasks — while every entity **keeps its current status**, so resuming always knows the last state. No plan/phase/task executes while `paused` is true.
 - **Pause (`paused = true`, Boss — on plan update or user action).** The Boss stops scheduling and the per-job process makes no model calls; in-flight work is **checkpointed** (warm session + partial results → job folder + DB). Statuses are left untouched — a running task stays `InProgress`.
 - **Resume (`paused = false`, Boss).** The Boss re-evaluates the (possibly updated) plan and schedules the next actionable work. If the plan changed while paused, the Senior Worker may **start a new task** rather than continue the interrupted one — a superseded in-flight task is abandoned/re-derived by the Analyzer, not blindly resumed.
-- A paused job **holds its concurrency slot** so it can resume immediately once the user provides more details or confirms. Pausing is **non-destructive**; the durable truth is still folders + DB.
+- A paused job **holds its concurrency slot** so it can resume immediately once the user provides more details or confirms. **Tradeoff (explicit):** because the slot is retained, up to **`max_concurrent_jobs` (default 3)** long-paused jobs can **block all queued complex work**. This is intentional — pausing favors fast, stateful resumption over throughput — but the **PM surfaces every paused job** (it still appears in `/req`) and the user can **abandon** one to free its slot; an optional `policies.yaml` knob (`paused_job_slot_timeout`, default off) can auto-release a slot after a long pause. Pausing is **non-destructive**; the durable truth is still folders + DB.
 
 ### Boss scheduling
 The **Boss** decides what runs next based on each Company-Expert decision and any user action:
@@ -440,16 +440,20 @@ flowchart TD
   K --> L[Company Expert: plan -> Resolved]
   L --> M[PM sends final report to user for confirmation]
   M --> CF{User confirms improvement?}
-  CF -->|yes, within guard| NJ[Start a NEW improvement job - new request]
-  CF -->|no / good enough| N[Librarian archives -> Library, plan -> Closed]
-  N --> O[Boss terminates process]
+  CF -->|yes, within guard| N
+  CF -->|no / good enough| N[Librarian archives original -> Library, plan -> Closed]
+  N --> O[Boss terminates original process]
+  O --> SP{Improvement confirmed?}
+  SP -->|yes| NJ[Spawn NEW improvement job - linked request]
+  SP -->|no| DONE[Done]
 ```
 
 ### Final report & improvement loop
 There is **no automatic generalize phase**. Instead, when a job's plan is `Resolved`, the **Plan Expert's final report** is **sent to the user for confirmation** (PM). The report's **gain** section names **what could be improved in the system** (refactors, reusable skills to extract, follow-ups — §9.2).
 
-- **User confirms an improvement →** a **new job** (a fresh request, linked to the original via `improves_request_id`) is started to do it. Improvement work is therefore *explicit and opt-in*, never a forced tail on every job.
-- **User declines / says "good enough" →** the job closes as-is.
+- **Either way, the original job is archived & closed first.** On **both** branches the **Librarian** archives the original to the Library, the **plan** moves `Resolved → Closed`, and the **Boss terminates the original per-job process** — the original never lingers in `Resolved`.
+- **User confirms an improvement →** *after* that closure, a **new job** (a fresh request, linked to the original via `improves_request_id`) is started to carry it out as its **own** request/job/process. Improvement work is therefore *explicit and opt-in*, never a forced tail on every job.
+- **User declines / says "good enough" →** nothing further is spawned; the (already archived) job is simply done.
 - **Endless-improvement guard.** Improvement chains are bounded: each confirmation step lets the user **stop**, and `policies.yaml` caps an auto-suggested chain (`max_improvement_iterations`, default 2) so the system never loops on "improve the improvement" without the user. The user can stop at any point if an improvement isn't paying off.
 
 > **Generated code still gated.** When a **feature** job (or an improvement job) produces reusable code/skills as part of its normal plan, the existing rule applies: **proposed → reviewed (Plan Expert) → user-confirmed (`confirm_generated_code: true` by default) → activated** under `backend/app/skills/generated/<job>/`; inert until confirmed. This is no longer tied to a special "last phase."
@@ -464,7 +468,7 @@ The **PM posts a progress update to the user after every phase sign-off** and on
 The user can **send a new request while others are still running**. The PM multiplexes several conversations at once, so requests must be individually addressable.
 
 ### Request identity
-- On intake, every request gets a **timestamp id** (`code` = **`YYYYMMDDHHmmSS`**, e.g. `20260614153000`) addressed as **`/req 20260614153000`** **and a title** (AI-drafted from the first message, **user-editable**).
+- On intake, every request gets a **timestamp id** (`code` = **`YYYYMMDDHHmmSS[-NN]`**, e.g. `20260614153000`; the **`-NN` suffix is appended only when two requests collide in the same second**) addressed as **`/req 20260614153000`** **and a title** (AI-drafted from the first message, **user-editable**).
 - The `/req <id>` + title appear in **every PM message about that request** (acknowledgement, clarifications, progress updates, final delivery) and are searchable in the library.
 - A request is **linked to its job** (§5); details the user adds later **append to the request** and flow into that job. Simple-ask requests also get an id but are usually answered immediately (no progress stream).
 
@@ -575,6 +579,7 @@ class RoleMessage(BaseModel):
 | `task_done` / `phase_done` | Senior Worker → Plan Expert | results for review |
 | `phase_report` / `final_report` | Plan Expert → Boss | assembled report (§9.2) |
 | `archive` | Company Expert → Librarian | commit + move to `Archive/` (§9.2) |
+| `archived` | Librarian → Boss | archive committed, plan `→ Closed`; the **Boss terminates the per-job process** — and, if the user confirmed an improvement, **spawns the linked improvement request** (§6B) |
 | `deliver` / `progress` / `clarify` / `undo_append` | Boss → PM | user-facing output / routing fix (§6C) |
 
 ### Per-role I/O contract
@@ -720,10 +725,10 @@ See **§7.2** for the device-flow login and the components that implement it.
 
 ### 7.1 Web search & live information
 
-Answering some asks needs fresh, external information. Since the default provider (GitHub Models) has **no native web-search tool**, live retrieval is a **deterministic skill** backed by the **Bing Web Search API**:
+Answering some asks needs fresh, external information. Since the **current GitHub-backed providers** (Copilot — Route A; GitHub Models — Route B) **don't expose a native web-search tool**, live retrieval is a **deterministic skill** backed by the **Bing Web Search API**:
 
 1. **`web.search` (primary).** Calls the **Bing Web Search API**, which returns ranked results + titles + snippets (and we can `web.fetch` + extract a specific URL when deeper text is needed). Using an official search API — not broad page scraping — is the main defense against **anti-crawl / anti-bot** blocking, and it yields clean, auditable per-source provenance (URLs + snapshots).
-2. **Provider-native search (optional, future).** The provider abstraction still supports a model with a built-in `web_search` capability; if one is configured later, the advisor can answer with it and record the returned citations. Not used with GitHub Models.
+2. **Provider-native search (optional, future).** The provider abstraction still supports a model with a built-in `web_search` capability; if one is configured later, the advisor can answer with it and record the returned citations. Not available on the current GitHub-backed routes.
 
 **Keeping AI out of the control path here.** Live retrieval is *information gathering for the advisor*, not an action the AI decides to take on the system:
 - The orchestrator decides *whether* a search is warranted (triage); the result is only used to **draft an answer**.
@@ -1070,7 +1075,7 @@ The **request → job → plan → phase → task** hierarchy (§5, §6B) is mir
 | `user_traits` | user_id, key, value, source, confidence, updated_at *(the "user characters": habit/liking/location…)* |
 | `sessions` | id, user_id, channel, status, started_at |
 | `messages` | id, session_id, direction, content, raw_json, created_at |
-| `requests` | id, code (`YYYYMMDDHHmmSS`, addressed as `/req <id>`), session_id, user_id, tenant_id, workspace, channel, title (AI-drafted, user-editable), status, improves_request_id (nullable → links an improvement request to its origin), importance, use_count, last_used_at, expires_at, state(active\|archived\|dropped), created_at *(user-facing envelope; `code`+`title` multiplex concurrent requests; carries a TTL)* |
+| `requests` | id, code (`YYYYMMDDHHmmSS[-NN]`, addressed as `/req <id>`; `-NN` collision suffix only on a same-second clash — the code **is** the folder name, §9.2), session_id, user_id, tenant_id, workspace, channel, title (AI-drafted, user-editable), status, improves_request_id (nullable → links an improvement request to its origin), importance, use_count, last_used_at, expires_at, state(active\|archived\|dropped), created_at *(user-facing envelope; `code`+`title` multiplex concurrent requests; carries a TTL)* |
 | `request_details` | id, request_id, content, source(user\|pm), routed_by(pm\|analyzer), confidence, state(active\|rejected\|reassigned, default active), reroute_count(default 0), created_at *(extra info appended after intake — §5; PM first-pass appends, Analyzer validates; a wrong append → `state` rejected/reassigned + a fresh `active` row under the correct request — §6C; reject event also in `audit_log`; **no new `requests` column needed**)* |
 | `jobs` | id, request_id, kind(ask\|task\|feature), clarity, complexity, folder_path, paused(bool, default false), paused_at (nullable), created_at *(unit of work, one per request; **no status of its own** — a complex job's lifecycle is its **plan**'s status (1:1), an ask is a one-shot tracked by its request; `paused` suspends the job — §6B)* |
 | `plans` | id, job_id, status(New\|Approved\|InProgress\|Resolved\|Closed\|Abandoned), approved_by, resolved_by, closed_by, created_at |
@@ -1080,7 +1085,7 @@ The **request → job → plan → phase → task** hierarchy (§5, §6B) is mir
 | `agents` | id, job_id (nullable for company roles), role, scope(company\|job), status, pid_or_thread, last_active_at *(role registry — the "employees")* |
 | `role_messages` | id, request_id, job_id (nullable), from_role, to_role, action, payload_json, template (versioned I/O contract id), status(queued\|in_progress\|done\|failed), causation_id (nullable → trace chain), created_at *(the inter-role **envelope** queue + log — §6D; the Boss routes on `action`; durable process store → recovery + audit)* |
 | `ai_calls` | id, job_id, step_id, role, model_id, prompt_ref, response_ref, tokens, latency_ms, validation_status, created_at |
-| `memories` | id, user_id, tenant_id, workspace, kind, entity_key, content, summary, importance, retention_class, confidence, decay_rate, use_count, last_used_at, expires_at, version, superseded_by, state(active\|archived\|dropped), source_ref, created_at, updated_at *(active = hot DB row + index; archived = row kept, excluded from hot index; **dropped → the DB row is deleted**, content retained on disk only, recoverable by full/deep search — §9.1)* |
+| `memories` | id, user_id, tenant_id, workspace, kind, entity_key, content, summary, importance, retention_class, confidence, decay_rate, use_count, last_used_at, expires_at, version, superseded_by, state(active\|archived\|dropped), source_ref, created_at, updated_at *(active = hot DB row + index; archived = row kept, excluded from hot index; **dropped = thin tombstone row kept** (`state=dropped`; `content`/`summary` offloaded to the on-disk dropped store; `*_fts`/`embeddings` rows removed) — preserves FK + `superseded_by` chains + `state=dropped` queries while the hot index stays small; content recoverable by full/deep search — §9.1)* |
 | `memory_tags` | memory_id, tag |
 | `memory_archive` | memory_id, compressed_content (zip of artifacts **except** the final report), archived_at *(cold store; excluded from the hot index; zip is **non-destructive** — fully restorable on a deep-search read)* |
 | `final_reports` | id, request_id, job_id, keywords_json, tags_json, brief_description, gain_good, gain_bad, gain_improve, improvement_suggestions_json, user_confirmed(bool), spawned_request_id (nullable → improvement job), outcome, artifact_path, created_at *(one per job; sent to the user for confirmation)* |
@@ -1136,7 +1141,7 @@ Memory must stay **small, fresh, and useful**. The retention mechanism is a **TT
 - `last_used_at`, `use_count` — reinforcement signals.
 - `expires_at` — sliding TTL (null for `core`).
 - `entity_key` — normalized key for evolving facts (e.g. `location:home`) enabling supersede/update.
-- `version`, `superseded_by`, `state ∈ {active, archived, dropped}`.
+- `version`, `superseded_by`, `state ∈ {active, archived, dropped}` *(a `dropped` item keeps a **thin tombstone** row — content offloaded to disk — so version chains stay followable)*.
 
 #### Retention tiers
 
@@ -1170,7 +1175,7 @@ Facts sharing an `entity_key` form a **version chain**. Writing a conflicting va
 
 #### Consolidation / forgetting job (the daily 24h sweep + on budget pressure)
 Deterministic pipeline run by the **every-24h TTL-maintenance job** (AI only *suggests* summaries, which are validated):
-1. **Expire (TTL)** — any item past `expires_at` that is low-importance & unreferenced → `dropped` (**DB rows deleted** — `library_index` / `*_fts` / `embeddings` / `memories`; the index entry **moves to the on-disk `dropped` index file**; folder content retained & still **full-/deep-searchable** — *not* purged); important ones → `archived` instead (DB row kept, out of hot index).
+1. **Expire (TTL)** — any item past `expires_at` that is low-importance & unreferenced → `dropped`: its **hot-index rows are deleted** (`*_fts` / `embeddings`, plus `library_index` for library items) and its entry **moves to the on-disk `dropped` index file**, while the **`memories` row is kept as a thin tombstone** (`state=dropped`, `content`/`summary` offloaded to disk) so FK / `superseded_by` / `state=dropped` queries survive; folder content retained & still **full-/deep-searchable** — *not* purged. Important ones → `archived` instead (DB row kept, out of hot index).
 2. **Decay** — recompute `w_eff` for active items; shorten/extend `expires_at` from importance + recent use.
 3. **Archive** — `long` items below `τ_archive` & stale → `archived` to cold store (**artifacts zipped — every file *except* the `final_report` — removing nothing, fully restorable**), removed from the hot FTS/vector index (recallable on explicit deep search; **reading an archived item revives it to hot** and refreshes its TTL — see *Reinforcement*).
 4. **Consolidate** — cluster near-duplicate `short`/`episodic` items → one validated summary; originals archived/dropped. **`core` is never consolidated.**
@@ -1182,7 +1187,7 @@ Deterministic pipeline run by the **every-24h TTL-maintenance job** (AI only *su
 #### Tiered storage keeps the total bounded
 - **Hot** = `active` items in FTS + vector index → default retrieval.
 - **Cold** = `archived` items: their **artifacts are zipped** into cold storage (**all files except the `final_report`, which stays uncompressed and readable**; *compression removes nothing* — the zip is fully restorable) and the entry is excluded from the hot index → recalled on a deep search; a **read revives** a cold item back to hot, unzips on demand, and refreshes its TTL.
-- **Dropped** = **evicted from the DB** — its `library_index` / `*_fts` / `embeddings` / `memories` rows are **deleted** so the hot DB index stays small — while its entry is **moved out of `index.json` into the on-disk `index.dropped.json`** (folder content + zip retained) → excluded from normal *and* deep **DB** retrieval, **but still searchable when the user asks for a full/deep search, or when a feature/improvement job mines past work** (these read the on-disk dropped index + folders, outside SQLite; a hit can **re-import** the item to the DB — revive). Dropping **removes the DB copy, not the data** — nothing on disk is purged except by an explicit user purge or a hard storage cap.
+- **Dropped** = **evicted from the hot DB index** — its `*_fts` / `embeddings` rows (and `library_index` row for library items) are **deleted** so the hot index stays small, while a **thin `memories` tombstone** (`state=dropped`, content offloaded to disk) is **kept** for FK / `superseded_by` / `state` integrity, and the entry is **moved out of `index.json` into the on-disk `index.dropped.json`** (folder content + zip retained) → excluded from normal *and* deep **DB** retrieval, **but still searchable when the user asks for a full/deep search, or when a feature/improvement job mines past work** (these read the on-disk dropped index + folders, outside SQLite; a hit can **re-import** the item to the hot DB — revive). Dropping **removes the hot DB copy, not the data** — nothing on disk is purged except by an explicit user purge or a hard storage cap.
 - **Core** = always hot/pinned, never compressed or dropped.
 
 **Importance gates loss.** High-importance items may be *archived* (cold, artifacts zipped) when unused for a very long time, but are **never dropped or destroyed** and revive on read; only low-importance, unused, expired items are **dropped** — moved to the `dropped` index, still recoverable by full/deep search, never auto-erased. This bounds the **hot** index while protecting (and retaining) what matters — nothing is purged except by an explicit user purge or a hard cap.
@@ -1221,7 +1226,7 @@ data/library/
   index.json                        # keyword/tag/description -> folder path map
   index.dropped.json                # entries for dropped items (full/deep search + improvement only)
 ```
-- **Folder name = the request id (`/req <id>`, `YYYYMMDDHHmmSS`).** Every request's work — ask, task, or feature — lives in a folder named by its **request id**, the same handle the user sees in chat and the DB, so chat ↔ folder ↔ `requests/jobs/…` rows line up for **traceability + recovery**. The id is **filesystem-safe** (digits only — no colons/spaces) and **sorts chronologically**. Because it has 1-second resolution, code appends a short tie-breaker suffix (`-NN`) when two requests land in the same second, so every folder name stays **unique**. *(Default is one job per request — §5 — so the request id alone names the folder; an **improvement job** is a separate request with its **own** id/folder, linked to its origin via `improves_request_id` in the DB, not by nesting.)*
+- **Folder name = the request id (`/req <id>`, `YYYYMMDDHHmmSS[-NN]`).** Every request's work — ask, task, or feature — lives in a folder named by its **request id**, the same handle the user sees in chat and the DB, so chat ↔ folder ↔ `requests/jobs/…` rows line up for **traceability + recovery**. The id is **filesystem-safe** (digits + optional `-NN` — no colons/spaces) and **sorts chronologically**. Because the timestamp has 1-second resolution, the canonical **`code` itself carries a `-NN` tie-breaker suffix** when two requests land in the same second — so the code stays unique **and** “folder name = request id” always holds (the suffix is part of the code, not a folder-only rename). *(Default is one job per request — §5 — so the request id alone names the folder; an **improvement job** is a separate request with its **own** id/folder, linked to its origin via `improves_request_id` in the DB, not by nesting.)*
 - **Simple asks** share `Active/Simple/`; **task** jobs get their own `Active/Tasks/<request-id>/` and **feature** jobs their own `Active/Features/<request-id>/` folder while running.
 - On completion, the **Librarian** moves the folder to `Archive/` and updates the DB + `index.json`. When the request later goes **cold** (§9.1), the folder is **compacted**: every file **except `final_report.md`** is zipped into `artifacts.zip` (process log, phases, produced artifacts) — the final report stays readable for search/preview and the zip **removes nothing** (restored on a deep-search read). A **dropped** request's index entry moves to `index.dropped.json`; its folder is kept and stays findable on an explicit full/deep search or for improvement work.
 - **Dual record (your rule).** Keywords/tags/brief description are written to **both** the **DB** (`final_reports`, `library_index` — the memory of important things) and the **on-disk index file** (`index.json` — the folder search map). Either can answer "have we done something like this before?". **On drop, the DB copy is removed and only the on-disk `index.dropped.json` copy remains** (§9.1) — so the DB always reflects the **hot/recoverable** set and the folder keeps the **full** history.
@@ -1376,7 +1381,7 @@ Proactive **schedules** are **created on demand — when the user asks for one**
 - AI output is **never** executed directly — always schema- + policy-validated first.
 - **Permissions per skill**; a policy engine gates side-effecting skills (network, file writes, external sends).
 - **Full audit log** with actor = system/ai/user; every AI call recorded in `ai_calls`.
-- **Secrets** via environment/`.env`, never persisted to the DB. Every provider **API token is read from the environment at call time** and never written to SQLite, logs, or the audit trail.
+- **Secrets** via environment/`.env` **or the permission-restricted auth cache**, never persisted to the DB. **PAT / API-key providers** (GitHub Models, OpenAI, Azure, Ollama) read their token **from env at call time**; **device-flow providers** (GitHub Copilot — Route A) read the OAuth/exchanged token **only from the git-ignored, permission-restricted auth cache** (`data/.auth/…`, §7.2). **Neither path** writes a token to SQLite, logs, the audit trail, or any model prompt.
 - **Env variables are secrets by default.** All environment variables (API tokens, keys, webhook secrets, …) are treated as secrets with a hard rule: **never written to any log, never included in any request sent to an AI model, and never shown to the user.** Model definition files reference only the **env var name** (`api_key_env`), never the value (§7.0). A startup check asserts no env value leaks into prompts, logs, or user-facing messages.
 - **Never send secrets to AI models.** A **redaction guard** ([backend/app/advisor/redaction.py](../backend/app/advisor/redaction.py)) runs on every prompt/text **before** it reaches a provider, scrubbing passwords, API keys/tokens, private keys, connection strings, and similar secrets (pattern- + entropy-based) **plus any value matching a known env-var secret**, replacing them with `[REDACTED]`. The advisor wrapper calls it on all outbound content (messages, memory snippets, tool inputs); in strict mode a detected secret can **block** the call instead of redacting. Redaction happens only on the copy sent to the model — stored data is unaffected.
 - **Never write secrets to logs.** The same detection runs on log/audit records: secrets and env values are scrubbed before anything is written to `process.log`, `audit_log`, or `ai_calls` prompt/response refs. Logs prefer **references** (ids/paths) over raw content.
@@ -1418,7 +1423,7 @@ Proactive **schedules** are **created on demand — when the user asks for one**
 - **Token exchange** — swapping a raw GitHub OAuth token (`gho_…`) for a short-lived Copilot API token via `copilot_internal/v2/token`, cached and auto-refreshed (§7.2).
 - **Owner** — the single GitHub account (from the device-flow login, §7.2) the bot belongs to; the only identity allowed to chat, optionally pinned via `OWNER_GITHUB_LOGIN` (§10.1).
 - **Pairing** — binding a chat account (`channel + channel_user_id`) to the **owner** by proving control of the owner's GitHub account via the device flow (or a host-minted one-time code), after which the Gateway **allowlists** that account; unpaired senders are refused (§10.1).
-- **Request id / code** — a timestamp reference `YYYYMMDDHHmmSS` addressed as `/req <id>`, assigned to every request to multiplex concurrent work (§6C).
+- **Request id / code** — a timestamp reference `YYYYMMDDHHmmSS[-NN]` addressed as `/req <id>`, assigned to every request to multiplex concurrent work; the optional `-NN` suffix is added only on a same-second collision and is part of the canonical code (= the folder name) (§6C, §9.2).
 - **Request title** — an AI-drafted, user-editable name shown in every PM message about a request (§6C).
 - **Progress update** — a PM message (tagged with request id + title) posted at each phase sign-off / major status change (§6C).
 - **Proposal** — an advisor's structured `{skill, params, rationale}` output, subject to validation.
