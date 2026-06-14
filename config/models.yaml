@@ -1,0 +1,41 @@
+# Model role -> provider mapping. Swapping a model is a config change here,
+# never a code change. See docs/design-spec.md sections 7 and 7.2.
+
+roles:
+  triage: fast
+  planner: quality
+  drafter: quality
+  extractor: fast
+  embedder: embed
+  # NOTE: web search is handled by the deterministic web.search skill (Bing),
+  # not a model role - GitHub Models has no native web-search tool.
+
+providers:
+  fast:
+    kind: github_models              # OpenAI-compatible API + GitHub auth/headers
+    model: openai/gpt-4o-mini        # {publisher}/{model} ID format
+    api_key_env: GITHUB_MODELS_TOKEN # fine-grained PAT with `models: read`
+    org_env: GITHUB_ORG              # optional -> org-attributed endpoint
+
+  quality:
+    kind: github_models
+    model: openai/gpt-4o
+    api_key_env: GITHUB_MODELS_TOKEN
+    org_env: GITHUB_ORG
+
+  embed:
+    kind: github_models
+    model: openai/text-embedding-3-small
+    api_key_env: GITHUB_MODELS_TOKEN
+    org_env: GITHUB_ORG
+
+  # Swap providers without code changes - e.g. BYOK for production rate limits:
+  # quality:
+  #   kind: openai_compatible
+  #   model: gpt-4o
+  #   base_url: https://api.openai.com/v1
+  #   api_key_env: OPENAI_API_KEY
+  # local-quality:
+  #   kind: ollama
+  #   model: llama3.1:8b
+  #   base_url: http://localhost:11434
