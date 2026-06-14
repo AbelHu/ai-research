@@ -2,7 +2,7 @@
 
 > **Status:** DRAFT for review (not started)
 > **Owner:** @abel
-> **Last updated:** 2026-06-14
+> **Last updated:** 2026-06-15
 > **Companion to:** [design-spec.md](design-spec.md) — this plan turns that spec into small, reviewable, individually-validated build steps.
 
 This document is the **build plan**: a `Plan → Phases → Tasks` breakdown (mirroring the spec's own vocabulary, §6B) that we execute **one small step at a time**. You review this plan first; then we implement task-by-task.
@@ -234,14 +234,14 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
   - *Validate:* `tests/test_lifecycle.py` — legal transitions pass, illegal rejected.
 - [ ] **T6.3 — Company Expert sign-off.** Approve/decline plans + phases (decline ≤`max_phase_declines`, then escalate).
   - *Validate:* test: decline path loops then escalates at the cap.
-- [ ] **T6.4 — Boss scheduling + per-job worker.** Spawn a per-job executor (asyncio task or process — see Open decisions), enforce the cap, queue extras.
+- [ ] **T6.4 — Boss scheduling + per-job runner.** Start a per-job runner as an **`asyncio` task** (decided — Open decision #2) grouping the execution roles; the Boss starts it on approval and **disposes** it after archive; enforce the `max_concurrent_jobs` cap, queue extras. Logical isolation only (own `JobContext` + folder + inbox); **no separate OS process**.
   - *Validate:* test: 4 complex jobs → 3 run, 1 queued.
 - [ ] **T6.5 — Senior Worker task execution.** Run tasks (respect deps, serial/parallel) through the skill runtime; warm-session checkpoint to folder+DB.
   - *Validate:* test: dependent tasks run in order; results recorded.
 - [ ] **T6.6 — Plan Expert phase/final reports.** Phase resolution + assemble final report; submit to Company Expert.
   - *Validate:* test: all tasks resolved → phase Resolved → report.
-- [ ] **T6.7 — Pause/resume + `paused` flag.** Job-level pause holds the slot (named tradeoff, §6B); resume re-evaluates plan.
-  - *Validate:* test: pause checkpoints + holds slot; resume continues.
+- [ ] **T6.7 — Pause/resume/abandon.** **Pause:** `jobs.paused` (DB) is the durable truth + a per-job `asyncio.Event` is the live signal; the Boss stops scheduling and the runner checkpoints + parks at the next step boundary (no flag file). Pause holds the slot (named tradeoff, §6B); resume re-evaluates the plan. **Abandon:** `task.cancel()` → `CancelledError`; a `try/finally` marks plan/phases/tasks `Abandoned` and frees the slot.
+  - *Validate:* test: pause checkpoints + holds slot + parks on the event; resume continues; abandon cancels, marks `Abandoned`, frees the slot.
 - [ ] **T6.8 — Improvement loop.** On finish: **archive+close original on both branches**, then optionally spawn a linked improvement request (`improves_request_id`), capped by `max_improvement_iterations`.
   - *Validate:* test: confirm-improvement spawns a linked request *after* the original is Closed; decline just closes.
 - [ ] **T6.9 — Feature-job deliverable: inert generated code/skills.** A **feature** job writes proposed skills/code into `backend/app/skills/generated/<job>/`, **inert** — not registered or executed — until confirmed (§5, §6B).
@@ -317,7 +317,7 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 ## Open decisions to confirm during review
 1. **Models config shape — decide before P3.** Keep the current single `config/models.yaml` (roles+providers), or migrate to the spec's `config/models/` folder + `model-bindings.yaml` (§7.0)? This **blocks P3** (templates, per-agent-role overrides, provider selection all key off it) and churns later if changed mid-stream. *(Recommend: keep the single file through P6; add `model-bindings.yaml` only when a per-agent-role override is actually needed.)*
-2. **Per-job concurrency mechanism.** True child **processes** (spec's isolation, §6A) vs **asyncio tasks** for a single-user local app? *(Recommend: start with asyncio tasks + the same recovery contract; revisit if isolation matters.)*
+2. **Per-job concurrency mechanism — DECIDED (2026-06-15): in-process `asyncio` runner, not a child process.** The work is I/O-bound, the durable truth is already folders + DB, and pause/resume/abandon + `/req` status sharing are far simpler in one address space; `asyncio` `cancel()` also gives clean cooperative abandon that OS threads can't. Isolation is **logical** (own `JobContext` + folder + inbox); a CPU-bound *skill* can be offloaded to a `ProcessPoolExecutor` if ever needed. Spec §6A/§6B updated to match. *(Revisit only if hard fault isolation / force-kill becomes necessary; the recovery contract makes that promotion cheap.)*
 3. **`sqlite-vec` dependency** for vectors (P5.2) — acceptable to add, or prefer a pure-Python fallback first?
 4. **Web frontend scope** (P9.6) — full React/Vite now, or REST + a minimal HTML page until later?
 5. **Test doubles for GitHub/Bing/Telegram** — confirm we mock all external HTTP in unit tests (no live calls in CI). *(Recommend: yes.)*

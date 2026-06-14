@@ -205,7 +205,8 @@ under the correct request (§6C) — no extra `requests` column needed.
 ### `jobs`
 The unit of work — **one per request**. It has **no status of its own**: a
 complex job's lifecycle is its `plans` row (1:1); an ask is one-shot. `paused`
-suspends the whole job (§6B). Created by
+is the **durable** flag that suspends the whole job; the runtime pairs it with an
+in-memory `asyncio.Event` for the live signal (§6B). Created by
 [`repos.requests.create_job`](../backend/app/storage/repos/requests.py).
 
 | Column | Type | Notes |
@@ -216,7 +217,7 @@ suspends the whole job (§6B). Created by
 | `clarity` | TEXT | |
 | `complexity` | TEXT | |
 | `folder_path` | TEXT | `Active/<kind>/<code>/` |
-| `paused` | INTEGER | bool, default `0` |
+| `paused` | INTEGER | bool, default `0`; durable pause flag (live signal is an in-memory `asyncio.Event` — §6B) |
 | `paused_at` | TEXT | nullable |
 | `created_at` | TEXT | default now |
 
@@ -309,17 +310,18 @@ erDiagram
 ```
 
 ### `agents`
-Role registry — the "employees". Company roles have `job_id` NULL; per-job roles
-reference their job.
+Role registry — the "employees", all **in-process coroutines on one `asyncio`
+loop** (§6A). Standing (company-context) roles have `job_id` NULL; per-job-runner
+roles reference their job.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER PK | |
 | `job_id` | INTEGER FK→jobs | CASCADE; nullable (company roles) |
 | `role` | TEXT | |
-| `scope` | TEXT | `company` \| `job` |
+| `scope` | TEXT | `company` (standing role) \| `job` (per-job-runner role) |
 | `status` | TEXT | |
-| `pid_or_thread` | TEXT | |
+| `pid_or_thread` | TEXT | the role's `asyncio` task name (single process; legacy column name) |
 | `last_active_at` | TEXT | |
 
 ### `role_messages`
@@ -579,8 +581,8 @@ records which migrations have been applied so `migrate()` is idempotent.
   up. The `-NN` suffix appears only on a same-second collision.
 - **Recovery.** The full hierarchy
   (`requests`/`jobs`/`plans`/`phases`/`plan_tasks`/`steps`) plus the request's
-  `Active/<kind>/` (or `Archive/`) folder reconstructs any crashed process; a
-  paused job resumes from its checkpoint.
+  `Active/<kind>/` (or `Archive/`) folder reconstructs any crashed/restarted
+  process or disposed job runner; a paused job resumes from its checkpoint.
 
 ---
 

@@ -2,7 +2,7 @@
 
 > **Status:** DRAFT for review
 > **Owner:** @abel
-> **Last updated:** 2026-06-14
+> **Last updated:** 2026-06-15
 
 A local-first assistant platform that talks to users over chat (Telegram → Feishu → Teams),
 fulfills **asks** (answer questions) and **requests** (complex multi-step tasks), and records
@@ -43,10 +43,10 @@ validated and audited before any action is taken.
 | Web/live search | **Bing Web Search API** via a deterministic `web.search` skill (the current GitHub-backed providers don't expose native web search); anti-crawl-aware |
 | Secrets | **Env variables are secrets**: never written to logs, never sent to any AI model in a request, never shown to the user. Secret redaction guard before every model call/log/reply; **PII not redacted**. |
 | Vocabulary | **Request** (what the user sends) → **Job** (created by the Analyzer, carries the **kind**: ask / task / feature) → **Plan** (for complex jobs). task + feature = a **complex job** (§5). |
-| Orchestration | **Role-based multi-agent**: one long-running **company** process (PM, Boss, Analyzer, Junior Worker, Company Expert, Librarian as threads) + a **per-job process** (Senior Workers + Plan Expert) spawned on plan approval (§6A). |
+| Orchestration | **Role-based multi-agent**, **one process / one `asyncio` loop**: standing roles (PM, Boss, Analyzer, Junior Worker, Company Expert, Librarian) as long-lived coroutines + a **per-job runner** (an `asyncio` task grouping Senior Workers + Plan Expert) started on plan approval (§6A). |
 | Planning | **Plan → phases → (recursive) tasks**; serial/parallel with dependencies; per-phase expert sign-off; **job pausable** (a `paused` flag); plans **revisable mid-flight** when the user adds info; status lifecycle (§6B). |
 | Completion | On finish, the **final report (incl. “what could improve”) is sent to the user for confirmation**; a confirmed improvement starts a **new bounded job** (no forced generalize phase). |
-| Concurrency | **Max 3** concurrent complex-job processes (configurable); simple asks handled in the company process. **Multiple requests multiplexed** — each has a **`/req <id>` (`YYYYMMDDHHmmSS`) + title**; user can ask progress, interrupt, pause, or abandon; PM posts **progress updates** per request (§6C). |
+| Concurrency | **Max 3** concurrent complex-job **runners** (`asyncio` tasks, configurable); simple asks handled in the company context. **Multiple requests multiplexed** — each has a **`/req <id>` (`YYYYMMDDHHmmSS`) + title**; user can ask progress, interrupt, pause, or abandon; PM posts **progress updates** per request (§6C). |
 | AI sessions | **Senior Worker & Plan Expert keep a warm AI session/cache** (recoverable on crash); **PM, Boss, Analyzer, Junior Worker, Company Expert, Librarian are transient** — Junior Worker drops idle sessions after ~15 min (§6A). |
 | Library & recovery | Finished work saved to **local folders** (in-flight under `Active/` split by kind — `Simple/`, `Tasks/`, `Features/` — then `Archive/`) + **DB & index file**; **all roles read** by keywords/tags/description; only the **Librarian** writes the archive/DB; **all state recoverable** from folders + DB (§9). |
 | Memory management | **Weighted + TTL memory** with decay, **reinforcement on use _or_ read** (a memory/archived-report **read** refreshes TTL + weight and revives a cold item), consolidation/forgetting, archival; bounded total (§9.1). |
@@ -67,7 +67,7 @@ validated and audited before any action is taken.
 5. **Record the process, not just the result.** Each task stores its plan and every step (skill, params, result, provenance, AI calls) so it can become memory.
 6. **Local & private by default.** No external calls unless a skill explicitly makes one. Secrets via env, never in the DB.
 7. **Codify what generalizes.** If an AI call's input→output mapping is stable enough to fix/generalize, implement it as a **skill** (deterministic code) and stop calling the model for it. AI is reserved for genuinely open-ended understanding; recurring AI patterns get *promoted* to skills over time — shrinking reliance on unreliable output.
-8. **Isolate agents per feature.** Each complex feature/ask runs in its own scoped worker process (tenant → workspace → feature → agent) so parallel work can't interfere. Because model calls are stateless, session/cache state lives in the deterministic worker, not the model.
+8. **Isolate agents per job (logically).** Each complex job runs in its own scoped **in-loop runner** — its own `JobContext` + folder + inbox (tenant → workspace → feature → agent) — so parallel work can't interfere; isolation is **logical**, not a separate OS process. Because model calls are stateless, session/cache state lives in the deterministic worker, not the model.
 
 ---
 
@@ -88,7 +88,7 @@ flowchart TB
     POLICY[Policy and Permissions]
   end
 
-  subgraph AGENTS["Agent Workers (isolated processes)"]
+  subgraph AGENTS["Agent Workers (in-loop job runners)"]
     SUP[Agent Supervisor]
     W1[Worker: feature A]
     W2[Worker: feature B]
@@ -149,7 +149,7 @@ flowchart TB
 - **Channel Adapters** — normalize inbound platform messages into a canonical `InboundMessage`; send replies via a canonical `OutboundMessage`. Handle webhooks/long-poll, attachments, identity.
 - **Gateway / Ingress** — authenticate/identify user, **enforce the paired-owner allowlist (reject unpaired senders — §10.1)**, resolve cross-channel identity, load/create session, enqueue work.
 - **Orchestrator / Router (control path)** — routes each task to the right agent worker by `(tenant, workspace, feature)`; owns the deterministic state machine contract: triage → clarify/plan/execute → validate → reply → record.
-- **Agent Supervisor & Workers** — a pool of **isolated child processes**, one per running feature, that hold the warm session/cache and run the per-task state machine. See §6A.
+- **Agent Supervisor & Workers** — a set of **in-loop job runners** (`asyncio` tasks, one per running complex job), logically isolated, that hold the warm session/cache and run the per-task state machine. See §6A.
 - **Skill Registry & Runtime** — registered skills with JSON-Schema params; validates params, enforces permissions, executes, captures result + provenance.
 - **AI Advisor (plugin)** — model-agnostic interface for triage/extraction/planning/drafting/embedding; wraps provider adapters; all outputs pass the validator/auditor.
 - **Memory & Storage** — SQLite (relational) + FTS5 (keyword) + vector index (semantic) + local blob store; weighted/decaying memory; repositories per entity.
@@ -180,13 +180,13 @@ flowchart LR
 
 | Kind | Definition | Plan? | Where it runs | Folder |
 |------|-----------|-------|---------------|--------|
-| **Ask** | Only needs search + answer. *E.g. "What's the weather this weekend?"* | No | **Company process** — assigned to the **Junior Worker** | shared `Active/Simple/` |
-| **Task** | A **complex** job that does **not** require new code to repeat, though it may still **produce reusable functions/skills** and **save user characters**. *E.g. "Compare these three vendors and recommend one."* | Yes | **Per-job process** | own folder in `Active/Tasks/` |
-| **Feature** | Needs **new code / a new skill** so the capability can be **repeated** later. *E.g. "Send me a daily report on my interests."* | Yes | **Per-job process** | own folder in `Active/Features/` |
+| **Ask** | Only needs search + answer. *E.g. "What's the weather this weekend?"* | No | **Company context** — assigned to the **Junior Worker** | shared `Active/Simple/` |
+| **Task** | A **complex** job that does **not** require new code to repeat, though it may still **produce reusable functions/skills** and **save user characters**. *E.g. "Compare these three vendors and recommend one."* | Yes | **Per-job runner** | own folder in `Active/Tasks/` |
+| **Feature** | Needs **new code / a new skill** so the capability can be **repeated** later. *E.g. "Send me a daily report on my interests."* | Yes | **Per-job runner** | own folder in `Active/Features/` |
 
-- **Task + Feature = a "complex job."** Both get a **plan**, a dedicated **process**, an `Active/Tasks/` or `Active/Features/` folder (by kind), expert **sign-off**, and a **final report**.
+- **Task + Feature = a "complex job."** Both get a **plan**, a dedicated **runner**, an `Active/Tasks/` or `Active/Features/` folder (by kind), expert **sign-off**, and a **final report**.
 - **A feature job produces reusable code/skills as part of its plan** (its deliverable); a task job may produce helpers opportunistically. There is **no forced "generalize" phase** — broader improvements are handled by the **final-report → improvement-job loop** (§6B).
-- **Asks** are the fast path: no plan, no separate process, answered (with validated sources) by the Junior Worker and logged under `Active/Simple/`.
+- **Asks** are the fast path: no plan, no dedicated runner, answered (with validated sources) by the Junior Worker and logged under `Active/Simple/`.
 - **Every** job — ask, task, feature — ends with a **final report + experience ("gain")** that is distilled into memory/skills and archived (§9.2). **Complex-job** reports are **sent to the user for confirmation** (and their *improve* notes can spawn an improvement job if confirmed — §6B); **ask** reports are **lightweight cards auto-archived without per-ask confirmation** (the fast path stays fast).
 
 ### Classification labels
@@ -210,7 +210,7 @@ flowchart TD
 
   PLAN --> SIGN{Company Expert<br/>approves plan?}
   SIGN -->|decline + comments| PLAN
-  SIGN -->|approve| PROC[Boss spawns per-job process]
+  SIGN -->|approve| PROC[Boss starts per-job runner]
   PROC --> PHASES[Run phases -> tasks -> phase sign-off]
   PHASES --> FINAL[Plan Expert: final report incl. 'what could improve']
 
@@ -241,20 +241,22 @@ flowchart TD
 
 ## 6A. Roles, Processes & Multi-Agent Orchestration
 
-The system is organized like a small **company of role-players**. Each role is an **AI-advised but code-controlled** agent. Roles run as **threads inside a process**; requests that need real work get **their own process** so they run in parallel without interfering. Because AI calls are **stateless**, all session/cache/working state lives in **deterministic code + per-request folders + SQLite** — never in the model — so everything is recoverable.
+The system is organized like a small **company of role-players**. Each role is an **AI-advised but code-controlled** agent. **All roles run in one process** on a single **`asyncio` event loop**: standing roles are long-lived coroutines, and each complex job gets its own **in-loop runner** (an `asyncio` task) so jobs run concurrently without interfering. Because AI calls are **stateless**, all session/cache/working state lives in **deterministic code + per-request folders + SQLite** — never in the model — so everything is recoverable.
 
-### Two kinds of process
+### One process, two execution contexts
 
-1. **Company process (one, long-running).** Always up. Hosts the standing roles as threads and handles all **simple-ask jobs** directly. Owns intake, analysis (request → job), planning, sign-off, and archival.
-2. **Per-job process (one per active complex job).** Spawned by the **Boss** *after a plan is approved*, for a **task** or **feature** job. Hosts the execution roles as threads, does the actual phase/task work, then is **terminated** once the result is archived. **Max 3 run concurrently** (configurable); extras queue.
+Everything runs in **one process / one `asyncio` event loop**; the two "contexts" below are **logical**, not separate OS processes:
 
-> Roles are **threads** (work here is I/O-bound: model calls, network, DB). True CPU parallelism *between* jobs comes from the separate **processes**, capped at 3.
+1. **Company context (standing roles, always up).** The long-lived coroutines — PM, Boss, Analyzer, Junior Worker, Company Expert, Librarian — plus all **simple-ask jobs**. Owns intake, analysis (request → job), planning, sign-off, and archival.
+2. **Per-job runner (one per active complex job).** Started by the **Boss** *after a plan is approved*, for a **task** or **feature** job — an `asyncio` task grouping the **Senior Worker(s) + Plan Expert** that does the actual phase/task work, then is **disposed** once the result is archived. **Max 3 run concurrently** (configurable); extras queue.
+
+> **Why one process (not a process per job).** The work is **I/O-bound** (model calls, network, DB), so `asyncio` already gives full concurrency — the GIL blocks only CPU parallelism, of which there is essentially none here. A separate process would buy **fault isolation** we don't need at single-user / max-3 scale while making the operations we run constantly — sharing job status, `paused`, and `/req` progress — cross-process and slow. **Isolation is logical** (each job has its own `JobContext` + folder + inbox), not physical; a genuinely CPU-bound *skill* can be offloaded to a `ProcessPoolExecutor` without promoting the whole job to a process.
 
 ```mermaid
 flowchart TB
   USER([User on chat]) <--> PM
 
-  subgraph COMPANY["Company process (long-running)"]
+  subgraph COMPANY["Company context — one process / asyncio loop"]
     PM[PM / Gateway]
     BOSS[Boss - flow + scheduling]
     ANALYZER[Analyzer - request to job, classify, search library, plan]
@@ -269,9 +271,9 @@ flowchart TB
   ANALYZER --> CEXPERT
   CEXPERT -->|plan approved| BOSS
 
-  BOSS -->|spawn after approval| P1
+  BOSS -->|start runner after approval| P1
 
-  subgraph P1["Per-job process (task/feature) - up to 3"]
+  subgraph P1["Per-job runner — asyncio task (task/feature), up to 3"]
     SENIOR[Senior Workers - run tasks]
     PEXPERT[Plan Expert - phase review + reports]
   end
@@ -279,45 +281,45 @@ flowchart TB
   PEXPERT -->|submit phase / final report| CEXPERT
   CEXPERT -->|final approved| PM
   CEXPERT -->|archive| LIBRARIAN
-  P1 -.terminated after archive.-> BOSS
+  P1 -.disposed after archive.-> BOSS
 ```
 
 ### Roles ("employees")
 
-**Company process (standing roles):**
+**Company context (standing roles):**
 
 | Role | Responsibility |
 |------|----------------|
 | **PM / Gateway** | The only role that chats with the user. Receives **requests**, asks clarifying questions, **appends details to the request**, relays info produced by other roles, and delivers the final result. |
-| **Boss** | Manages flow and **scheduling**; drives statuses; **spawns the per-job process** once a plan is approved and **terminates** it after archival; enforces the concurrency cap (3). |
+| **Boss** | Manages flow and **scheduling**; drives statuses; **starts the per-job runner** (an `asyncio` task) once a plan is approved and **disposes** it after archival; enforces the concurrency cap (3). |
 | **Analyzer** | First decides whether an **unaddressed message** starts a **new request** or **appends to an open one** (§6C); then turns a **request into a job**: assigns the **kind** (ask/task/feature), **searches the library** (DB + folders) for reusable memory/skills/prior work, and — for complex jobs — **creates the plan** (phases → tasks). |
 | **Junior Worker** | Cheap, fast **first-pass triage** on intake (is this a simple ask?) and **handles simple-ask jobs** end-to-end (search + validated answer). **Separate from the Analyzer:** it hands anything non-trivial to the Analyzer for authoritative classification + planning. |
-| **Company Expert** | **Approves/declines plans**; reviews phase submissions and the **final report**; reviews Junior Worker output; generates the **archive report incl. user character** (habits, likings, location, …) when warranted. **Separate from the Plan Expert:** it lives in the **company process** and may use a **different (stronger) model** for sign-off than the per-job Plan Expert. |
+| **Company Expert** | **Approves/declines plans**; reviews phase submissions and the **final report**; reviews Junior Worker output; generates the **archive report incl. user character** (habits, likings, location, …) when warranted. **Separate from the Plan Expert:** it is a **standing (company-context) role** and may use a **different (stronger) model** for sign-off than the per-job Plan Expert. |
 | **Librarian** | **Sole writer** of the archived **Library** folders and DB tables; indexes keywords/tags/descriptions; performs archival and retrieval bookkeeping. |
 
-**Per-job process (execution roles, spawned on approval):**
+**Per-job runner (execution roles, started on approval):**
 
 | Role | Responsibility |
 |------|----------------|
 | **Senior Worker(s)** | Execute **tasks** (`Approved → InProgress → Resolved`); move the owning phase `Active → InProgress`. Multiple may run in parallel for independent tasks. |
-| **Plan Expert** | Reviews task results; when **all** tasks of a phase are done, marks the phase **Resolved**, writes the **phase report**, and **submits it to the Company Expert** for sign-off; assembles the **plan's final report**. Runs **inside the per-job process** and may use a **different model** from the Company Expert. |
+| **Plan Expert** | Reviews task results; when **all** tasks of a phase are done, marks the phase **Resolved**, writes the **phase report**, and **submits it to the Company Expert** for sign-off; assembles the **plan's final report**. Runs **inside the per-job runner** and may use a **different model** from the Company Expert. |
 
-> **Role separations (decided).** **PM (first-pass request-routing: auto-assign id, best-guess append-vs-new)** and **Analyzer (authoritative routing validation: confirm or reject the append)** are **separate** — the same first-pass-vs-authoritative split as Junior Worker (fast first-pass triage) vs Analyzer (confirm kind + library search + planning). Plan Expert (per-request, in-process review) and Company Expert (company-process sign-off) are **separate** — they run in different processes and can use different model-roles, giving an independent second review.
+> **Role separations (decided).** **PM (first-pass request-routing: auto-assign id, best-guess append-vs-new)** and **Analyzer (authoritative routing validation: confirm or reject the append)** are **separate** — the same first-pass-vs-authoritative split as Junior Worker (fast first-pass triage) vs Analyzer (confirm kind + library search + planning). Plan Expert (per-job-runner review) and Company Expert (standing company-context sign-off) are **separate** — they run in different execution contexts and can use different model-roles, giving an independent second review.
 
 ### Role duties at a glance
 
 A one-line duty roster consolidating the roles above with the status-setters of §6B. **All roles read** the Library; **only the Librarian writes** the archive/DB (everyone else proposes — § Library access & authority). "Sets" = the statuses/flags this role drives.
 
-| Role | Process | Primary duties | Sets / signs off |
+| Role | Context | Primary duties | Sets / signs off |
 |------|---------|----------------|------------------|
 | **PM / Gateway** | Company | The **only** role that talks to the user. **Auto-assigns a `/req <id>` to every inbound message (first-pass routing: mint-new on an empty queue, else best-guess append-vs-new — §6C)**; receives requests, asks clarifications, appends details, posts progress updates, delivers and confirms the final report, runs `/req` commands, surfaces the device-flow login code, and escalates when the Boss/Expert ask. On an Analyzer reject, **undoes the last append and re-associates** it (≤1). | mints `requests` (id+title) + appends `request_details`; on reject undoes/re-associates |
-| **Boss** | Company | **Flow + scheduling**: dispatch each request to the Analyzer and, on an **append reject**, ask the PM to **undo + re-associate** (bounded by `max_append_reroutes`, default 1; then PM clarifies — §6C); spawn the per-job process on approval, schedule the next action after each decision/user action, set & clear the job's `paused` flag, enforce the **max-3** concurrency cap, terminate the process after archive. | plan `→ InProgress` (spawn); phase `→ Active`; job `paused` on/off; drives append undo/re-route |
+| **Boss** | Company | **Flow + scheduling**: dispatch each request to the Analyzer and, on an **append reject**, ask the PM to **undo + re-associate** (bounded by `max_append_reroutes`, default 1; then PM clarifies — §6C); start the per-job runner on approval, schedule the next action after each decision/user action, set & clear the job's `paused` flag, enforce the **max-3** concurrency cap, dispose the runner after archive. | plan `→ InProgress` (start runner); phase `→ Active`; job `paused` on/off; drives append undo/re-route |
 | **Analyzer** | Company | **Validate the PM's append/new association** for a dispatched request — **reject a wrong append** (→ Boss undo/re-route — §6C); classify **kind / clarity / complexity**; search the Library for reuse; draft and revise the **plan → phases → tasks**. | rejects wrong appends; drafts plan/phases/tasks as `New` |
 | **Junior Worker** | Company | Cheap **first-pass triage** on intake; handle **simple asks** end-to-end (search + validated answer); assemble the ask's final report. | — (ask path; no plan) |
 | **Company Expert** | Company | **Approve/decline plans**; sign off completed **phases** and the **final report**; review Junior Worker output; extract user characters for archival. | plan `Approved` / `Resolved`; phase `Closed` or `→ Active` (decline); task `Closed` |
 | **Librarian** | Company | **Sole writer** of the archive + DB: commit `final_reports`, `library_index`, `memory*`, move folders to `Archive/`, keep `index.json` in sync. | plan `Closed` (after archive) |
-| **Senior Worker(s)** | Per-job | Execute **tasks** (respect dependencies; serial/parallel); keep a recoverable warm session. | task `InProgress` / `Resolved`; phase `Active → InProgress` |
-| **Plan Expert** | Per-job | Review task results; when all of a phase's tasks are done write the **phase report**; assemble the plan's **final report**; keep a recoverable warm session. | phase `Resolved` |
+| **Senior Worker(s)** | Job runner | Execute **tasks** (respect dependencies; serial/parallel); keep a recoverable warm session. | task `InProgress` / `Resolved`; phase `Active → InProgress` |
+| **Plan Expert** | Job runner | Review task results; when all of a phase's tasks are done write the **phase report**; assemble the plan's **final report**; keep a recoverable warm session. | phase `Resolved` |
 
 > **Single-writer rule.** Only the **Librarian** commits archive folders and library/memory DB tables; every other role's "writes" are **proposals** the Librarian applies, keeping archival deterministic and race-free. Warm sessions are held **only** by Senior Worker & Plan Expert (§ AI session & cache lifecycle).
 
@@ -335,13 +337,13 @@ The model API itself is **stateless** (every call re-sends its context). On top 
 | **PM, Company Expert, Librarian** | **No long session.** Invoked transiently; rebuild the little context they need per invocation. | Their work is short, bursty, and not context-compounding; no need to hold a cache. |
 | **Boss, Analyzer** | **No session.** Boss is mostly deterministic control. The **Analyzer caches nothing** — everything it needs for a job is in the job's folder + the library, fetched on demand. | One-shot per decision; fully recoverable from folders/DB. |
 
-- **Recovery (Senior Worker / Plan Expert).** Because these are the only roles holding meaningful warm state, they checkpoint enough (current step, retrieved-context refs, partial results) into the job folder + DB that a restarted per-job process **rehydrates** the session and resumes. The warm cache is an optimization; the **durable truth is still folders + DB**.
+- **Recovery (Senior Worker / Plan Expert).** Because these are the only roles holding meaningful warm state, they checkpoint enough (current step, retrieved-context refs, partial results) into the job folder + DB that a restarted job runner **rehydrates** the session and resumes. The warm cache is an optimization; the **durable truth is still folders + DB**.
 - **Idle reaping.** A background timer drops idle Junior-Worker sessions (default 15 min, `policies.yaml: junior_session_idle_minutes`) and may shrink other transient caches to bound memory.
 
 ### State, isolation & recovery
 - **Per-job working folder.** Each complex job gets a folder under `Active/Tasks/<request-id>/` or `Active/Features/<request-id>/` (grouped by kind; named by the linked request's id, the user-facing handle) holding its plan, phase/task artifacts, process log, and draft reports. Simple-ask jobs share `Active/Simple/`.
-- **Durable truth = folders + DB.** SQLite holds structured state (requests, jobs, plans, phases, tasks, statuses, memory, index); folders hold artifacts and reports. **All state is recoverable** from folders + DB — a crashed/terminated process is rebuilt from them.
-- **Isolation.** Per-job processes share nothing in memory; they coordinate with the company process over IPC (a **`RoleMessage` task/result queue with an `action` verb — §6D**) and through the DB. A crash in one job can't affect others.
+- **Durable truth = folders + DB.** SQLite holds structured state (requests, jobs, plans, phases, tasks, statuses, memory, index); folders hold artifacts and reports. **All state is recoverable** from folders + DB — a crashed/restarted process (or a disposed job runner) is rebuilt from them.
+- **Isolation (logical).** Job runners share **no working state** in memory — each has its own `JobContext` + folder + inbox — and coordinate with the standing roles via the **in-process `RoleMessage` queue (an `action`-verb task/result queue — §6D)** and the DB. An unhandled error in one runner is caught at its task boundary and can't corrupt another job (no shared mutable state).
 - **Warm vs durable.** Only **Senior Worker** and **Plan Expert** keep a warm AI session/cache (recoverable as above); all other roles are transient. Either way, **no cache is ever the source of truth** — it is always reconstructable from folders/DB.
 
 ---
@@ -355,14 +357,14 @@ For a **task** or **feature** job, the Analyzer produces a **plan**:
 - Tasks run **serial or parallel**. A task with **dependencies waits** until *all* its dependents are `Resolved`.
 - A **phase** is `Resolved` only after **all** its tasks are `Resolved` **and** the Plan Expert accepts.
 - **Plans are revisable mid-flight.** When the user provides new info (via `/req <id>`), the Analyzer may **add or update phases and their tasks** on the *same* job (one job per request). To apply changes cheaply, the **job can be paused** (see *Pause / resume* below) so in-flight work stops without losing state while the plan is updated.
-- When a phase is `Resolved`, it is **submitted to the Company Expert** (company process) to **review and sign off**. The Expert writes a **phase report** and **accepts** or **declines** it.
+- When a phase is `Resolved`, it is **submitted to the Company Expert** (company context) to **review and sign off**. The Expert writes a **phase report** and **accepts** or **declines** it.
   - **Declined →** the Company Expert moves the phase **`Resolved → Active`** and attaches **comments** indicating either **reactivate an existing task** or **ask the Analyzer to add new tasks**. The **Boss** then **schedules the next action** (below). A phase may be declined at most **`max_phase_declines` times (default 3, configurable)**; beyond that the **PM escalates to the user** to decide (accept as-is, change scope, or abandon).
   - **Accepted →** the Company Expert moves the phase **and its tasks** `Resolved → Closed`, and the next phase begins.
-- After the **final** phase is `Closed`, the **Plan Expert** assembles the **final report**; the **Company Expert** moves the **plan** `→ Resolved`; the **PM delivers the final report to the user for confirmation** (the report includes *what could be improved* — see *Final report & improvement loop*); the **Librarian** archives all artifacts and then moves the **plan** `Resolved → Closed`; the **Boss** terminates the per-job process.
+- After the **final** phase is `Closed`, the **Plan Expert** assembles the **final report**; the **Company Expert** moves the **plan** `→ Resolved`; the **PM delivers the final report to the user for confirmation** (the report includes *what could be improved* — see *Final report & improvement loop*); the **Librarian** archives all artifacts and then moves the **plan** `Resolved → Closed`; the **Boss** disposes the per-job runner.
 
 ### Pause / resume
 **Pause is a job-level flag, not a status.** The **job** carries a boolean **`paused`** (with `paused_at`); setting it suspends the whole job — its plan, phases, and tasks — while every entity **keeps its current status**, so resuming always knows the last state. No plan/phase/task executes while `paused` is true.
-- **Pause (`paused = true`, Boss — on plan update or user action).** The Boss stops scheduling and the per-job process makes no model calls; in-flight work is **checkpointed** (warm session + partial results → job folder + DB). Statuses are left untouched — a running task stays `InProgress`.
+- **Pause (`paused = true`, Boss — on plan update or user action).** `jobs.paused` (DB) is the **durable source of truth**; a per-job in-memory **`asyncio.Event`** is the **live signal**. The Boss sets the flag (in a transaction), clears the event, and **stops scheduling** new work (the coarse lever). The runner observes the pause only at a **checkpoint between atomic steps** — never mid-step (a side-effecting skill can't be safely interrupted) — where it **checkpoints** partial state (warm session + partial results → job folder + DB) and **parks** on the event. Statuses are left untouched — a running task stays `InProgress`. No flag file is needed: in-process the event is immediate, and on restart the Boss rehydrates `paused` from the DB and simply doesn't schedule the job.
 - **Resume (`paused = false`, Boss).** The Boss re-evaluates the (possibly updated) plan and schedules the next actionable work. If the plan changed while paused, the Senior Worker may **start a new task** rather than continue the interrupted one — a superseded in-flight task is abandoned/re-derived by the Analyzer, not blindly resumed.
 - A paused job **holds its concurrency slot** so it can resume immediately once the user provides more details or confirms. **Tradeoff (explicit):** because the slot is retained, up to **`max_concurrent_jobs` (default 3)** long-paused jobs can **block all queued complex work**. This is intentional — pausing favors fast, stateful resumption over throughput — but the **PM surfaces every paused job** (it still appears in `/req`) and the user can **abandon** one to free its slot; an optional `policies.yaml` knob (`paused_job_slot_timeout`, default off) can auto-release a slot after a long pause. Pausing is **non-destructive**; the durable truth is still folders + DB.
 
@@ -372,7 +374,7 @@ The **Boss** decides what runs next based on each Company-Expert decision and an
 - **Phase declined (`→ Active`), reactivate existing task →** schedule the **declined phase's task(s)** back to the **Senior Worker** (with the Expert's comments).
 - **Phase declined (`→ Active`), needs new work →** schedule the **Analyzer** to **add new tasks** to the phase; once added, their `Senior Worker` runs them.
 - **New user info →** set the job's **`paused`** flag, have the **Analyzer** add/update phases & tasks, then **clear `paused`** to resume.
-- **User action (interrupt / pause / abandon) →** set the job's **`paused`** flag, or **abandon** the work (plan/phases/tasks → `Abandoned`) (§6C).
+- **User action (interrupt / pause / abandon) →** set the job's **`paused`** flag (pause), or **abandon** the work — **cancel the job runner** (`task.cancel()`); its `try/finally` records partial state, marks plan/phases/tasks → `Abandoned`, and **releases the slot** (§6C).
 - **Decline limit reached (`max_phase_declines`, default 3) →** stop the loop and have the **PM escalate to the user**.
 
 ### Status lifecycle
@@ -382,7 +384,7 @@ The state set is **New, Approved, Active, InProgress, Resolved, Closed**, plus *
 |--------|-------------------|
 | **Task** | `New` (drafted with the plan) → `Approved` (plan approved) → `InProgress` (Senior Worker starts) → `Resolved` (Senior Worker **finishes the task**) → `Closed` (Company Expert, when it **accepts the owning phase**). On phase decline, a reactivated task goes `Resolved → InProgress` again (Boss schedules it). Blocked tasks wait on dependencies. |
 | **Phase** | `New` (drafted with the plan) → `Approved` (plan approved) → `Active` (Boss makes it the current phase) → `InProgress` (Senior Worker starts a task) → `Resolved` (**Plan Expert**, when all tasks `Resolved` **and** Plan Expert accepts) → **`Closed`** (**Company Expert** accepts) **or** **`→ Active`** (**Company Expert** declines, with comments; up to `max_phase_declines`). |
-| **Plan** | `New` (Analyzer drafts) → `Approved` (Company Expert approves the plan) → `InProgress` (Boss spawns the per-job process) → `Resolved` (**Company Expert**, after **all phases `Closed`**) → `Closed` (**Librarian**, after **all artifacts archived**). The Analyzer may **add/update phases** while active. *Because job ↔ plan is 1:1, this row is also the job's lifecycle.* |
+| **Plan** | `New` (Analyzer drafts) → `Approved` (Company Expert approves the plan) → `InProgress` (Boss starts the per-job runner) → `Resolved` (**Company Expert**, after **all phases `Closed`**) → `Closed` (**Librarian**, after **all artifacts archived**). The Analyzer may **add/update phases** while active. *Because job ↔ plan is 1:1, this row is also the job's lifecycle.* |
 | **Any** | → `Abandoned` (user cancels or Company Expert declines permanently), reachable from any active state. **Pause** is not a status: the job's `paused` flag suspends all its plan/phase/tasks while they keep their current state. |
 
 > **Who sets `Resolved` vs `Closed`:** Senior Worker → task `Resolved`; Plan Expert → phase `Resolved`; **Company Expert → accept: task & phase `Closed`; decline: phase `→ Active` + comments; plan `Resolved` (all phases closed)**; **Librarian → plan `Closed` (archived)**. The **Boss** schedules the next action — and sets/clears the job's **`paused`** flag — after each decision or user action.
@@ -393,7 +395,7 @@ stateDiagram-v2
   state "Plan" as PL {
     [*] --> pl_New
     pl_New --> pl_Approved: Company Expert approves
-    pl_Approved --> pl_InProgress: Boss spawns per-job process
+    pl_Approved --> pl_InProgress: Boss starts per-job runner
     pl_InProgress --> pl_Resolved: Company Expert (all phases closed)
     pl_Resolved --> pl_Closed: Librarian (archived)
   }
@@ -442,7 +444,7 @@ flowchart TD
   M --> CF{User confirms improvement?}
   CF -->|yes, within guard| N
   CF -->|no / good enough| N[Librarian archives original -> Library, plan -> Closed]
-  N --> O[Boss terminates original process]
+  N --> O[Boss disposes original job runner]
   O --> SP{Improvement confirmed?}
   SP -->|yes| NJ[Spawn NEW improvement job - linked request]
   SP -->|no| DONE[Done]
@@ -451,7 +453,7 @@ flowchart TD
 ### Final report & improvement loop
 There is **no automatic generalize phase**. Instead, when a job's plan is `Resolved`, the **Plan Expert's final report** is **sent to the user for confirmation** (PM). The report's **gain** section names **what could be improved in the system** (refactors, reusable skills to extract, follow-ups — §9.2).
 
-- **Either way, the original job is archived & closed first.** On **both** branches the **Librarian** archives the original to the Library, the **plan** moves `Resolved → Closed`, and the **Boss terminates the original per-job process** — the original never lingers in `Resolved`.
+- **Either way, the original job is archived & closed first.** On **both** branches the **Librarian** archives the original to the Library, the **plan** moves `Resolved → Closed`, and the **Boss disposes the original job runner** — the original never lingers in `Resolved`.
 - **User confirms an improvement →** *after* that closure, a **new job** (a fresh request, linked to the original via `improves_request_id`) is started to carry it out as its **own** request/job/process. Improvement work is therefore *explicit and opt-in*, never a forced tail on every job.
 - **User declines / says "good enough" →** nothing further is spawned; the (already archived) job is simply done.
 - **Endless-improvement guard.** Improvement chains are bounded: each confirmation step lets the user **stop**, and `policies.yaml` caps an auto-suggested chain (`max_improvement_iterations`, default 2) so the system never loops on "improve the improvement" without the user. The user can stop at any point if an improvement isn't paying off.
@@ -498,7 +500,7 @@ This keeps AI out of the control path: the PM's first-pass and the Analyzer's va
 - **Retry bound (max 1)** → routing-control state owned by the Boss for the in-flight handshake; persisted as `request_details.reroute_count` only so a mid-reroute restart is recoverable.
 
 ### Delivering details to the right request
-- New details for a running complex job are queued to **that job's process** (its `Active/<kind>/<request-id>/` folder + inbox); the Boss **pauses the job** (`paused`), has the **Analyzer** add/update phases & tasks, then **resumes** — under the normal plan/sign-off rules (no mid-flight corruption).
+- New details for a running complex job are queued to **that job's runner** (its `Active/<kind>/<request-id>/` folder + inbox); the Boss **pauses the job** (`paused`), has the **Analyzer** add/update phases & tasks, then **resumes** — under the normal plan/sign-off rules (no mid-flight corruption).
 - Up to **3 complex jobs run concurrently** (§6A); extras queue with status shown to the user.
 
 ### User actions on a running job
@@ -506,7 +508,7 @@ The user can act on any job at any time via the PM:
 - **Ask progress** — the PM reports the job's status: phases **done**, current phase, and **what's next** (the PM also pushes this automatically as each phase is signed off).
 - **Interrupt / correct** — send new details to **fix something in the request**; the Boss pauses, the Analyzer updates the plan, then resumes.
 - **Pause / resume** — temporarily stop work to save cost/time.
-- **Abandon** — cancel the job (its plan/phases/tasks → `Abandoned`; an ask, having no plan, is simply dropped).
+- **Abandon** — cancel the job runner (`task.cancel()` → `CancelledError` at the next `await`; a `try/finally` records the partial state, sets its plan/phases/tasks → `Abandoned`, and frees the concurrency slot). An ask, having no runner, is simply dropped. *Pause vs abandon: pause preserves state to resume; abandon discards in-flight work.*
 
 ### User-facing commands (PM)
 - **`/req`** — list active/queued requests with `id`, title, kind, status, current phase.
@@ -532,7 +534,7 @@ flowchart TD
   VAL -->|"rejected (retries left, max 1)"| UNDO[Boss: PM undoes last append + re-associates] --> DISP
   VAL -->|"rejected (retries exhausted)"| ASK[PM asks user: which request?]
   ASK -->|user replies| PM1
-  AZ --> ROUTE[Simple ask -> Junior Worker; task/feature -> plan + per-job process]
+  AZ --> ROUTE[Simple ask -> Junior Worker; task/feature -> plan + per-job runner]
 ```
 
 > Concurrency is bounded and deterministic: ids/titles are assigned by code, routing decisions are validated, and each job's state lives in its own `Active/<kind>/<request-id>/` folder + DB rows — so parallel jobs never share working state, and the user can always tell them apart.
@@ -577,11 +579,11 @@ class RoleMessage(BaseModel):
 | `ask_done` | Junior Worker → Boss | validated answer + final-report card |
 | `review_plan` / `review_phase` / `review_final` | Boss → Company Expert | sign-off requests |
 | `approved` / `declined` | Company Expert → Boss | verdict + comments (§6B) |
-| `run_phase` / `run_task` | Boss → Senior Worker | execute work (per-job process) |
+| `run_phase` / `run_task` | Boss → Senior Worker | execute work (per-job runner) |
 | `task_done` / `phase_done` | Senior Worker → Plan Expert | results for review |
 | `phase_report` / `final_report` | Plan Expert → Boss | assembled report (§9.2) |
 | `archive` | Company Expert → Librarian | commit + move to `Archive/` (§9.2) |
-| `archived` | Librarian → Boss | archive committed, plan `→ Closed`; the **Boss terminates the per-job process** — and, if the user confirmed an improvement, **spawns the linked improvement request** (§6B) |
+| `archived` | Librarian → Boss | archive committed, plan `→ Closed`; the **Boss disposes the per-job runner** — and, if the user confirmed an improvement, **spawns the linked improvement request** (§6B) |
 | `deliver` / `progress` / `clarify` / `undo_append` | Boss → PM | user-facing output / routing fix (§6C) |
 
 ### Per-role I/O contract
@@ -602,7 +604,7 @@ class RoleMessage(BaseModel):
 
 ### Templates & storage
 - **Templates folder.** Prompt templates + their response JSON-Schemas live in **`config/templates/`** (`<role>.<action>.md` + `.schema.json`), **versioned** like `config/models/` (§7.0) so prompts evolve without code changes; the `template` field pins the exact version used.
-- **Durable queue / process store.** Envelopes are persisted in a **`role_messages`** table (the inter-role queue + log — §9), so the flow is **recoverable** (rebuild in-flight hand-offs after a crash) and **auditable** (the `causation_id` chain reconstructs who-asked-whom). This is the spec's version of CoC's per-process JSON store + `index.json`.
+- **Durable queue / process store.** Envelopes are **delivered in-process** (an `asyncio` queue routed by the Boss — no cross-process IPC) and persisted in a **`role_messages`** table (the inter-role queue + log — §9), so the flow is **recoverable** (rebuild in-flight hand-offs after a crash) and **auditable** (the `causation_id` chain reconstructs who-asked-whom). This is the spec's version of CoC's per-process JSON store + `index.json`.
 - **Maps to existing audit.** A role's AI sub-call still writes an `ai_calls` row (§7); a skill it runs still writes a `steps` row (§8.6). `role_messages` adds the **routing layer** above those.
 
 ### Worked trace — "compare three vendors"
@@ -1279,7 +1281,7 @@ The **"gain"** is not just prose — a deterministic function turns the validate
 AI **drafts** the report and proposals; **code validates** them against schemas and the skill catalog; the **Company Expert** signs off; the **Librarian** commits. Nothing is promoted to a skill or memory without passing validation — keeping AI out of the control path even here.
 
 #### Recovery
-Because the plan/phase/task hierarchy lives in the DB and every artifact + report lives in the folders (with `index.json` mirroring the DB), **all state is recoverable**: a crashed or terminated process is rebuilt from `requests/jobs/plans/phases/plan_tasks/steps` + the request's `Active/<kind>/` (or `Archive/`) folder. A paused job (`jobs.paused`) resumes from its checkpoint.
+Because the plan/phase/task hierarchy lives in the DB and every artifact + report lives in the folders (with `index.json` mirroring the DB), **all state is recoverable**: a crashed/restarted process (or a disposed job runner) is rebuilt from `requests/jobs/plans/phases/plan_tasks/steps` + the request's `Active/<kind>/` (or `Archive/`) folder. A paused job (`jobs.paused`) resumes from its checkpoint.
 
 ---
 
@@ -1414,9 +1416,9 @@ Proactive **schedules** are **created on demand — when the user asks for one**
 - **Model-role** — a config knob mapping a kind of work (triage/planner/drafter/embedder) to a swappable model; distinct from an **agent role**.
 - **Model definition** — a file in `config/models/` naming a provider kind, model id, and `api_key_env` (token comes from `.env`) (§7.0).
 - **Model binding** — `config/model-bindings.yaml`: maps model-roles (and optional per-agent-role overrides) to model definitions; assignment is **auth/endpoint only**, no shared skills/memory (§7.0).
-- **Agent role** — a code-controlled, AI-advised "employee" thread: PM, Boss, Analyzer, Junior Worker, Company Expert, Librarian, Senior Worker, Plan Expert (§6A).
-- **Company process** — the long-running process hosting the standing roles; handles simple-ask jobs.
-- **Per-job process** — a process spawned on plan approval to execute one complex job; terminated after archival (max 3 concurrent).
+- **Agent role** — a code-controlled, AI-advised "employee" coroutine: PM, Boss, Analyzer, Junior Worker, Company Expert, Librarian, Senior Worker, Plan Expert (§6A).
+- **Company context** — the long-running process / `asyncio` loop hosting the standing roles; handles simple-ask jobs.
+- **Per-job runner** — an `asyncio` task started on plan approval to execute one complex job (groups Senior Worker(s) + Plan Expert); disposed after archival (max 3 concurrent).
 - **Warm AI session** — a role's reusable in-process context/cache; kept only by **Senior Worker** & **Plan Expert** (recoverable from folders/DB), transient for other roles (§6A).
 - **Idle reaping** — dropping a Junior-Worker session after a configurable idle period (default 15 min) since asks shift topics (§6A).
 - **Plan / Phase / Task** — the recursive execution hierarchy for a complex job; tasks may have child tasks (§6B).
