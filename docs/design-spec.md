@@ -187,7 +187,7 @@ flowchart LR
 - **Task + Feature = a "complex job."** Both get a **plan**, a dedicated **process**, an `Active/Tasks/` or `Active/Features/` folder (by kind), expert **sign-off**, and a **final report**.
 - **A feature job produces reusable code/skills as part of its plan** (its deliverable); a task job may produce helpers opportunistically. There is **no forced "generalize" phase** — broader improvements are handled by the **final-report → improvement-job loop** (§6B).
 - **Asks** are the fast path: no plan, no separate process, answered (with validated sources) by the Junior Worker and logged under `Active/Simple/`.
-- **Every** job — ask, task, feature — ends with a **final report + experience ("gain")**: the report is **sent to the user for confirmation** and then distilled into memory/skills and archived (§9.2). The gain's *improve* notes can spawn a **new improvement job** if the user confirms (§6B).
+- **Every** job — ask, task, feature — ends with a **final report + experience ("gain")** that is distilled into memory/skills and archived (§9.2). **Complex-job** reports are **sent to the user for confirmation** (and their *improve* notes can spawn an improvement job if confirmed — §6B); **ask** reports are **lightweight cards auto-archived without per-ask confirmation** (the fast path stays fast).
 
 ### Classification labels
 When the Analyzer turns a request into a job it assigns: `kind ∈ {ask, task, feature}`, `clarity ∈ {clear, unclear}`, `complexity ∈ {simple, complex}`, each with a confidence score + rationale. The **Junior Worker** does a cheap **first-pass** triage on intake (is this a simple ask I can just answer?); the **Analyzer** makes the **authoritative** classification and (for complex jobs) searches the library and builds the plan (§6A).
@@ -553,7 +553,7 @@ Roles never free-form "chat" to each other. Each hand-off is a **`RoleMessage` e
 ```python
 class RoleMessage(BaseModel):
     id: str
-    request_id: str                 # /req correlation id (§6C)
+    request_id: str                 # FK -> requests.id; user-facing /req handle is requests.code (§6C)
     job_id: str | None
     from_role: Role
     to_role: Role                   # usually Boss — the deterministic router
@@ -564,6 +564,8 @@ class RoleMessage(BaseModel):
     causation_id: str | None        # the message this one answers (trace chain)
     created_at: datetime
 ```
+
+> **Id invariant (resolves drift).** `request_id` is always the **DB foreign key** (`requests.id`); the **user-facing `/req` handle** is `requests.code` (`YYYYMMDDHHmmSS[-NN]`, §6C). Every related table (`request_details`, `jobs`, `role_messages`, `final_reports`, `library_index`, `ai_calls`) joins on `request_id`; only chat/UX surfaces display `code`.
 
 ### Action vocabulary (the verbs the Boss routes on)
 | `action` | From → To | Meaning |
@@ -589,7 +591,7 @@ class RoleMessage(BaseModel):
 |------|-------------|---------------|-------------|--------------------|--------------|
 | **PM** | (raw inbound) | channel message | `pm.route` *(opt: title + best-guess)* | `RouteGuess{mode:new\|append, candidate_id?, confidence, title?}` | `route_request` |
 | **Boss** | any `*_done` / `route_request` | the envelope | — *(deterministic)* | — | the next verb |
-| **Analyzer** | `analyze` | `RequestCard{request_id,title,text,append?}` + library ctx | `analyzer.analyze` | `Analysis{belongs:bool, kind, clarity, complexity, confidence, rationale, plan?:PlanDraft, clarify?:[str]}` | `analysis_done` |
+| **Analyzer** | `analyze` | `RequestCard{request_id, request_code, title, text, append?}` + library ctx | `analyzer.analyze` | `Analysis{belongs:bool, kind, clarity, complexity, confidence, rationale, plan?:PlanDraft, clarify?:[str]}` | `analysis_done` |
 | **Junior Worker** | `answer_ask` | `RequestCard` + search hits | `junior.answer` | `AnswerDraft{answer, citations:[Source], confidence}` | `ask_done` |
 | **Company Expert** | `review_*` | plan / phase / final report | `expert.review` | `Verdict{decision:approve\|decline, comments:[str], characters?:[Trait]}` | `approved` / `declined` |
 | **Senior Worker** | `run_task` | `TaskSpec{task_id, goal, deps, catalog}` | `worker.next_action` | `ProposedAction{skill, params, rationale}` (§8.4) | `task_done` / `phase_done` |
@@ -1044,7 +1046,7 @@ No model, no network — fully deterministic unit tests.
 4. **Runtime** → validate params → read-only, no confirmation → run `memory_search` → record step.
 5. **Draft reply** (advisor) from the hits → **validated** (must cite the memory it used).
 6. **`reply.send`** via the Telegram adapter.
-7. **Memory update** → nothing durable here; audit rows (`ai_calls`, `steps`) written.
+7. **Final-report card + memory** → the Junior Worker assembles a **lightweight ask card** (`keywords` + `tags` + `brief_description` + `gain`, the §9.2 schema) → validated → the **Librarian commits** it to `final_reports` + `Active/Simple/<request-id>/` + `library_index`; any durable traits are written; audit rows (`ai_calls`, `steps`, `role_messages`) recorded. *(Ask cards are **auto-archived, not user-confirmed** — confirmation is reserved for complex jobs, §6B.)*
 
 Everything the AI did (triage label, proposal, draft) was schema-validated and logged; the only things that *ran* were registered skills.
 
@@ -1084,7 +1086,7 @@ The **request → job → plan → phase → task** hierarchy (§5, §6B) is mir
 | `steps` | id, job_id, plan_task_id (nullable for simple-ask jobs), idx, skill_name, params_json, status, result_json, provenance_json, started_at, ended_at *(the "process")* |
 | `agents` | id, job_id (nullable for company roles), role, scope(company\|job), status, pid_or_thread, last_active_at *(role registry — the "employees")* |
 | `role_messages` | id, request_id, job_id (nullable), from_role, to_role, action, payload_json, template (versioned I/O contract id), status(queued\|in_progress\|done\|failed), causation_id (nullable → trace chain), created_at *(the inter-role **envelope** queue + log — §6D; the Boss routes on `action`; durable process store → recovery + audit)* |
-| `ai_calls` | id, job_id, step_id, role, model_id, prompt_ref, response_ref, tokens, latency_ms, validation_status, created_at |
+| `ai_calls` | id, request_id (FK → requests.id), role_message_id (nullable → the §6D envelope this call served), job_id (nullable), step_id (nullable), role, model_id, template (versioned I/O contract id), prompt_ref, response_ref, tokens, latency_ms, validation_status, created_at *(**every** model call is recorded — incl. ones **before a job/step exists**, e.g. PM title-draft / Analyzer association — keyed by `request_id`; `code` joinable via `requests`)* |
 | `memories` | id, user_id, tenant_id, workspace, kind, entity_key, content, summary, importance, retention_class, confidence, decay_rate, use_count, last_used_at, expires_at, version, superseded_by, state(active\|archived\|dropped), source_ref, created_at, updated_at *(active = hot DB row + index; archived = row kept, excluded from hot index; **dropped = thin tombstone row kept** (`state=dropped`; `content`/`summary` offloaded to the on-disk dropped store; `*_fts`/`embeddings` rows removed) — preserves FK + `superseded_by` chains + `state=dropped` queries while the hot index stays small; content recoverable by full/deep search — §9.1)* |
 | `memory_tags` | memory_id, tag |
 | `memory_archive` | memory_id, compressed_content (zip of artifacts **except** the final report), archived_at *(cold store; excluded from the hot index; zip is **non-destructive** — fully restorable on a deep-search read)* |
@@ -1126,10 +1128,10 @@ The **request → job → plan → phase → task** hierarchy (§5, §6B) is mir
 
 ### 9.1 Memory weighting, decay, refresh & forgetting
 
-Memory must stay **small, fresh, and useful**. The retention mechanism is a **TTL (time-to-live) clock on every saved item — both memories and tasks**: a background job runs **every 24 hours**, and when an item's TTL expires it is dropped (if unimportant and unreferenced) or archived (if important). **Neither erases content** — *archive* zips the item's artifacts into cold storage (the **final report stays readable**) and *drop* just moves its index entry into a separate **dropped index** (content retained, still recoverable by full/deep search). **Using/referencing an item resets and extends its TTL**, so things you actually rely on survive and things you don't fade out of normal search. An **importance** score sets how long the TTL is and whether expiry means *archive* vs *drop* — **important items are never dropped**, only archived. The same `importance` also weights retrieval ranking.
+Memory must stay **small, fresh, and useful**. The retention mechanism is a **TTL (time-to-live) clock on every saved item — both memories and saved *request cards*** (the archived `requests`/`final_reports` entry, which carries its own `importance`/`use_count`/`last_used_at`/`expires_at`; **not** the per-plan `plan_tasks` rows, which live and die with their plan, §6B): a background job runs **every 24 hours**, and when an item's TTL expires it is dropped (if unimportant and unreferenced) or archived (if important). **Neither erases content** — *archive* zips the item's artifacts into cold storage (the **final report stays readable**) and *drop* just moves its index entry into a separate **dropped index** (content retained, still recoverable by full/deep search). **Using/referencing an item resets and extends its TTL**, so things you actually rely on survive and things you don't fade out of normal search. An **importance** score sets how long the TTL is and whether expiry means *archive* vs *drop* — **important items are never dropped**, only archived. The same `importance` also weights retrieval ranking.
 
 #### TTL — the retention clock
-- **Everything saved has a TTL.** On write, each memory/task gets `expires_at = now + base_ttl(retention_class, importance)`.
+- **Everything saved has a TTL.** On write, each memory / saved request-card gets `expires_at = now + base_ttl(retention_class, importance)`.
 - **Daily sweep (every 24h).** A deterministic maintenance job re-evaluates every active item: recompute weight/decay, and if `now ≥ expires_at` → **drop** when low-importance & unreferenced, else **archive** (recoverable) when important. `core` never expires.
 - **Use *or* read extends TTL (refresh).** Reinforcement fires on **two** triggers: an item **used** in a validated answer/step, **or** an item **deliberately read/opened** through a read function (`memory.get`, `library.read` — §8.10). On either, set `last_used_at = now`, bump `use_count`, and push `expires_at` forward by an importance-scaled amount — so each read slides the item's expiry **past whatever it was scheduled to be before the read**, keeping a memory alive longer than (and beyond) the job/plan that consulted it. Frequent/important use → effectively permanent; one-off, unimportant items → expire on schedule. *(Merely appearing as a **candidate** in a `memory.search` result set is **not** a trigger — only a deliberate read/consult is — so speculative searches can't inflate weights.)*
 - **Net effect (your rule).** “A saved task/memory is dropped if it is not important **and** not referenced within its TTL” — exactly the drop condition; referenced or important items are kept (kept hot, or archived), and the total stays bounded.
@@ -1182,7 +1184,7 @@ Deterministic pipeline run by the **every-24h TTL-maintenance job** (AI only *su
 5. **Promote** — sustained high `w_eff`/`use_count` moves `short → long`; `→ core` only by explicit pin.
 6. **Budget enforce** — if the hot index exceeds its soft cap, evict the lowest-`w_eff` **non-core** items (archive medium, drop low) until under cap.
 
-> The same sweep applies to **saved tasks**: an unimportant task not referenced before its TTL is dropped; an important one is archived.
+> The same sweep applies to **saved request cards** (an archived ask/task/feature in `requests`/`final_reports`, which carry the TTL fields): an unimportant card not referenced before its TTL is dropped; an important one is archived. *(Per-plan `plan_tasks` are not independently retained — they belong to their plan's lifecycle, §6B.)*
 
 #### Tiered storage keeps the total bounded
 - **Hot** = `active` items in FTS + vector index → default retrieval.
@@ -1191,6 +1193,11 @@ Deterministic pipeline run by the **every-24h TTL-maintenance job** (AI only *su
 - **Core** = always hot/pinned, never compressed or dropped.
 
 **Importance gates loss.** High-importance items may be *archived* (cold, artifacts zipped) when unused for a very long time, but are **never dropped or destroyed** and revive on read; only low-importance, unused, expired items are **dropped** — moved to the `dropped` index, still recoverable by full/deep search, never auto-erased. This bounds the **hot** index while protecting (and retaining) what matters — nothing is purged except by an explicit user purge or a hard cap.
+
+**Drop — what's deleted vs kept (by object type).** “Drop” shrinks the **hot search index**, never the durable record:
+- **Deleted (hot-index rows only):** `*_fts`, `embeddings`, and the `library_index` mirror row — so search stays small.
+- **Tombstone kept (`state=dropped`):** the `requests` row (FK target + folder name) and the `memories` row (`content`/`summary` offloaded to disk) — preserving FK integrity and `superseded_by`/`version` chains.
+- **Survives untouched:** `final_reports` (the durable card — small, FK-referenced) and the on-disk folder (`final_report.md` + `artifacts.zip`), now indexed only in `index.dropped.json`. Re-import (revive) re-creates the deleted hot-index rows from these.
 
 #### Worked example — "weather in Paris"
 1. Ask "weather in Paris" → write `weather:paris@2026-06-14` (**ephemeral**, TTL ~12h, low importance); and only if it signals where the user *is*, refresh `location:home = Paris` (**long**, higher importance).
@@ -1229,7 +1236,7 @@ data/library/
 - **Folder name = the request id (`/req <id>`, `YYYYMMDDHHmmSS[-NN]`).** Every request's work — ask, task, or feature — lives in a folder named by its **request id**, the same handle the user sees in chat and the DB, so chat ↔ folder ↔ `requests/jobs/…` rows line up for **traceability + recovery**. The id is **filesystem-safe** (digits + optional `-NN` — no colons/spaces) and **sorts chronologically**. Because the timestamp has 1-second resolution, the canonical **`code` itself carries a `-NN` tie-breaker suffix** when two requests land in the same second — so the code stays unique **and** “folder name = request id” always holds (the suffix is part of the code, not a folder-only rename). *(Default is one job per request — §5 — so the request id alone names the folder; an **improvement job** is a separate request with its **own** id/folder, linked to its origin via `improves_request_id` in the DB, not by nesting.)*
 - **Simple asks** share `Active/Simple/`; **task** jobs get their own `Active/Tasks/<request-id>/` and **feature** jobs their own `Active/Features/<request-id>/` folder while running.
 - On completion, the **Librarian** moves the folder to `Archive/` and updates the DB + `index.json`. When the request later goes **cold** (§9.1), the folder is **compacted**: every file **except `final_report.md`** is zipped into `artifacts.zip` (process log, phases, produced artifacts) — the final report stays readable for search/preview and the zip **removes nothing** (restored on a deep-search read). A **dropped** request's index entry moves to `index.dropped.json`; its folder is kept and stays findable on an explicit full/deep search or for improvement work.
-- **Dual record (your rule).** Keywords/tags/brief description are written to **both** the **DB** (`final_reports`, `library_index` — the memory of important things) and the **on-disk index file** (`index.json` — the folder search map). Either can answer "have we done something like this before?". **On drop, the DB copy is removed and only the on-disk `index.dropped.json` copy remains** (§9.1) — so the DB always reflects the **hot/recoverable** set and the folder keeps the **full** history.
+- **Dual record (your rule).** Keywords/tags/brief description are written to **both** the **DB** (`final_reports`, `library_index` — the memory of important things) and the **on-disk index file** (`index.json` — the folder search map). Either can answer "have we done something like this before?". **On drop, only the `library_index` mirror row is removed** (the `final_reports` card is **kept**); the on-disk entry moves to `index.dropped.json` (§9.1) — so the DB's *hot index* reflects the **hot/recoverable** set while the durable card + folder keep the **full** history.
 
 #### Final report format (per request)
 Produced for ask/task/feature; assembled by the Junior Worker (asks) or Plan Expert (tasks/features), validated, then committed by the Librarian:

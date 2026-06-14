@@ -28,7 +28,8 @@ A task is "done" only when **all** of these hold:
 Run from `backend/` unless noted.
 - **Unit tests:** `python -m pytest -q` (or a single file: `python -m pytest tests/test_x.py -q`)
 - **Type/lint (added in P0.2):** `python -m ruff check .` and `python -m ruff format --check .`
-- **Auth/config smoke:** `python -m app.cli.verify`
+- **Config check (no network):** `python -m app.cli.verify --dry-run`
+- **Live auth smoke (manual, opt-in):** `python -m app.cli.verify --live`
 - **End-to-end ask (from P4):** `python -m app.cli.ask "what is 2+2?"`
 - **DB inspect (from P1):** `python -m app.cli.db --schema`
 
@@ -58,13 +59,13 @@ Run from `backend/` unless noted.
 
 | Phase | Theme | First end-to-end milestone | Spec |
 |-------|-------|----------------------------|------|
-| **P0** | Foundations & test harness | `pytest` + `verify` green | §7, §12 |
+| **P0** | Foundations & test harness | `pytest` + lint + `verify --dry-run` green (no network) | §7, §12 |
 | **P1** | Storage & data model | DB schema creates + round-trips | §9 |
 | **P2** | Skills as APIs | a read-only skill runs through the runtime | §8 |
 | **P3** | AI advisor wrapper | model output validated into a schema (fake provider) | §7 |
 | **P4** | Roles, envelope & control loop | **a simple ask answered end-to-end via CLI** | §6, §6A, §6D |
 | **P5** | Memory & library | search + TTL + final report on disk | §9, §9.1, §9.2 |
-| **P6** | Complex jobs (plan→phase→task) | a task job runs phases with sign-off | §6B |
+| **P6** | Complex jobs (task **and** feature) | a task job runs phases with sign-off; a feature job emits gated generated code | §6B, §5 |
 | **P7** | Auth (device flow) & owner pairing | `login` + `pair` + allowlist | §7.2, §10.1 |
 | **P8** | Channels (Telegram) | answer a real Telegram message | §10 |
 | **P9** | Web app (FastAPI + dashboard) | Requests/System/Reports pages | §11 |
@@ -89,7 +90,11 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
   - *Validate:* `tests/test_policies.py` asserts defaults load + override works.
 - [ ] **T0.6 — Provider unit test with a fake transport.** Test `OpenAICompatibleProvider.complete` against a mocked `httpx` (no network) to lock the request/response shape + that redaction is applied.
   - *Validate:* `python -m pytest tests/test_providers.py -q`.
-- ✅ **Checkpoint P0** — baseline green: tests + lint + `verify` documented.
+- [ ] **T0.7 — Redact embedding inputs (security).** `embed()` currently posts texts **unredacted** (`providers.py`); route embedding inputs through the redaction guard (strict-block on a hit) before they leave the machine — closes the "never send secrets to any AI model" gap (§12) **ahead of P5.2**.
+  - *Validate:* `tests/test_providers.py::test_embed_redacts` — a planted secret never appears in the captured `/embeddings` request body.
+- [ ] **T0.8 — Deterministic `verify --dry-run` (config-only).** Add a **no-network** mode to `app.cli.verify` that checks config + role→provider mapping + token presence **without calling GitHub**; the **live** completion check becomes explicit opt-in (`--live`, manual smoke only). Keeps CI/test runs offline (open decision #5).
+  - *Validate:* `python -m app.cli.verify --dry-run` exits 0 with a stubbed env; `tests/test_verify_dryrun.py` (no network).
+- ✅ **Checkpoint P0** — baseline green: tests + lint + `verify --dry-run` pass with **no network**; the live `--live` smoke is optional/manual.
 
 ---
 
@@ -131,8 +136,8 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
   - *Validate:* `tests/test_registry.py` registers a dummy skill + reads its catalog entry.
 - [ ] **T2.2 — `SkillContext`.** `app/skills/context.py` — deterministic services only (db, config, user_id, logger); explicitly **no model**.
   - *Validate:* test constructs a context with a fake db.
-- [ ] **T2.3 — Policy gate.** `app/skills/policy.py` — permission + `side_effects`/confirmation rules.
-  - *Validate:* `tests/test_policy.py` — read-only skill needs no confirm; side-effecting one does.
+- [ ] **T2.3 — Policy gate (permission scope + effect class + confirmation rule).** `app/skills/policy.py` — each skill declares a **permission scope** + an **effect class** (`read` | `local_write` | `external`); confirmation is required **only** for `external` / user-visible effects, while `local_write` (`memory.write`, `memory.tag`, `profile.update`, reinforcement touches) is **permission-gated but not user-confirmed** (§9.1) — avoids over-prompting on local DB writes. *(Generalizes the spec's `side_effects: bool` into an effect class.)*
+  - *Validate:* `tests/test_policy.py` — `read` & `local_write` skip confirmation; `external` requires it; a missing permission is rejected.
 - [ ] **T2.4 — Runtime `execute()`.** `app/skills/runtime.py` — validate params → policy gate → run → record `steps` row (the §8.6 pipeline). Reject unknown skill.
   - *Validate:* `tests/test_runtime.py` — happy path records a step; bad params rejected; unknown skill raises.
 - [ ] **T2.5 — First read-only skill: `memory.search`.** Wire to the P1 memories repo (stub ranking for now).
@@ -163,7 +168,11 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
   - *Validate:* test injects a fake secret → never present in the captured request.
 - [ ] **T3.6 — `Advisor.triage` (first typed method).** Returns `Triage{kind, clarity, complexity, confidence, rationale}` via template `triage.classify`.
   - *Validate:* test: fake provider → valid `Triage`.
-- ✅ **Checkpoint P3** — AI output is schema-validated + audited; provider swappable.
+- [ ] **T3.7 — `Advisor.analyze` (analyzer contract).** Template `analyzer.analyze` → validated `Analysis{belongs, kind, clarity, complexity, confidence, rationale, plan?, clarify?}` (§6D). *(Required by P4.4 — without it the first CLI ask can't satisfy the role contract.)*
+  - *Validate:* test: fake provider → valid `Analysis`; malformed → repair then fallback.
+- [ ] **T3.8 — `Advisor.answer` (junior contract).** Template `junior.answer` → validated `AnswerDraft{answer, citations:[Source], confidence}` (§6D). *(Required by P4.5; the answer must carry ≥1 citation.)*
+  - *Validate:* test: fake provider → valid `AnswerDraft`; a zero-citation answer is rejected.
+- ✅ **Checkpoint P3** — AI output is schema-validated + audited; the `triage` / `analyze` / `answer` contracts P4 needs all exist; provider swappable.
 
 ---
 
@@ -177,9 +186,9 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
   - *Validate:* test: given `analysis_done{plan_ready}` → schedules `review_plan`.
 - [ ] **T4.3 — PM first-pass routing.** `app/roles/pm.py` — wrap inbound into a `RequestCard`, auto-assign `/req` id, empty-queue=new, else best-guess (§6C). Emits `route_request`.
   - *Validate:* `tests/test_pm_routing.py` — empty queue mints new; explicit `/req <id>` appends.
-- [ ] **T4.4 — Analyzer validation + triage.** `app/roles/analyzer.py` — confirm append vs reject (≤`max_append_reroutes`), classify kind (uses P3 advisor). For an **ask**, route to Junior Worker.
+- [ ] **T4.4 — Analyzer validation + triage.** `app/roles/analyzer.py` — confirm append vs reject (≤`max_append_reroutes`), classify kind (uses `Advisor.analyze`, T3.7). For an **ask**, route to Junior Worker.
   - *Validate:* test: wrong append rejected once → reroute; clear ask → `answer_ask`.
-- [ ] **T4.5 — Junior Worker (ask path).** `app/roles/junior.py` — run `memory.search` (+ stub web later) → draft validated answer with citations → `ask_done`.
+- [ ] **T4.5 — Junior Worker (ask path).** `app/roles/junior.py` — run `memory.search` (+ stub web later) → draft validated answer with citations (uses `Advisor.answer`, T3.8) → `ask_done`.
   - *Validate:* test: ask → validated `AnswerDraft`.
 - [ ] **T4.6 — Control loop + `ask` CLI.** `app/cli/ask.py` drives one request through the company roles synchronously and prints the answer.
   - *Validate:* `python -m app.cli.ask "hello"` returns a validated answer; `tests/test_ask_e2e.py` with fake provider.
@@ -195,7 +204,7 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 - [ ] **T5.1 — FTS5 keyword search.** `*_fts` mirrors + `MemoryService.keyword_search`.
   - *Validate:* test indexes 3 memories, queries, ranks.
-- [ ] **T5.2 — Embeddings + vector search (sqlite-vec).** Wire `embedder` role; store/query vectors. *(Decision: confirm `sqlite-vec` dependency — see Open decisions.)*
+- [ ] **T5.2 — Embeddings + vector search (sqlite-vec).** Wire `embedder` role; store/query vectors (embedding inputs already pass the redaction guard — T0.7). *(Decision: confirm `sqlite-vec` dependency — see Open decisions.)*
   - *Validate:* test embeds via fake embedder + nearest-neighbor returns expected id.
 - [ ] **T5.3 — Hybrid ranking (RRF).** Merge FTS + vector deterministically.
   - *Validate:* test: hybrid beats either alone on a planted example.
@@ -217,7 +226,7 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 ## P6 — Complex jobs: plan → phase → task (§6B)
 
-> Goal: a **task** job runs a plan with phases, sign-off, and a final report. Concurrency capped at `max_concurrent_jobs`.
+> Goal: a **task** job runs a plan with phases, sign-off, and a final report — **and a feature job** additionally emits gated generated code/skills (§5). Concurrency capped at `max_concurrent_jobs`.
 
 - [ ] **T6.1 — Analyzer plan drafting.** Produce a validated `PlanDraft` (phases→tasks, deps) via the advisor.
   - *Validate:* test: complex request → schema-valid plan.
@@ -235,7 +244,11 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
   - *Validate:* test: pause checkpoints + holds slot; resume continues.
 - [ ] **T6.8 — Improvement loop.** On finish: **archive+close original on both branches**, then optionally spawn a linked improvement request (`improves_request_id`), capped by `max_improvement_iterations`.
   - *Validate:* test: confirm-improvement spawns a linked request *after* the original is Closed; decline just closes.
-- ✅ **Checkpoint P6** — complex jobs run with sign-off, concurrency, recovery.
+- [ ] **T6.9 — Feature-job deliverable: inert generated code/skills.** A **feature** job writes proposed skills/code into `backend/app/skills/generated/<job>/`, **inert** — not registered or executed — until confirmed (§5, §6B).
+  - *Validate:* `tests/test_generated_inert.py` — a feature plan writes generated code; it is **absent from the live catalog** and never executed.
+- [ ] **T6.10 — Generated-code review → confirm → activate.** Plan Expert review + user confirmation (`confirm_generated_code: true`) flips a generated skill to **active/registered**; a decline leaves it inert.
+  - *Validate:* test: confirm → skill now in catalog + runnable through the runtime; decline → stays inert.
+- ✅ **Checkpoint P6** — task **and** feature jobs run with sign-off, concurrency, recovery; generated code is gated.
 
 ---
 
@@ -283,13 +296,15 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
   - *Validate:* test: seeded request renders via the API.
 - [ ] **T9.3 — System API.** CPU/mem/disk (host-metrics service) + model usage aggregated from `ai_calls`.
   - *Validate:* test: usage aggregation matches seeded `ai_calls`.
-- [ ] **T9.4 — Reports & Data Products API + Refresh-now.** List products + run history; `Refresh now` re-invokes generator skills via code.
-  - *Validate:* test: refresh triggers a deterministic run + new `reports` row.
+- [ ] **T9.4 — Reports & Data Products API + Refresh-now (manual path).** List products + run history; `Refresh now` re-invokes generator skills via code (the **manual** refresh path; scheduled firing is T9.7).
+  - *Validate:* test: refresh triggers a deterministic run + a new `reports` row.
 - [ ] **T9.5 — Settings: paired accounts.** Pair/revoke from the web (calls P7).
   - *Validate:* test: revoke flips `user_identities.state`.
 - [ ] **T9.6 — Minimal React/Vite shell (optional).** Lightweight dashboard hitting the APIs. *(Confirm scope at review.)*
   - *Validate:* build succeeds; one page renders seeded data.
-- ✅ **Checkpoint P9** — dashboard shows requests, system, and data products.
+- [ ] **T9.7 — Scheduler runner (scheduled auto-refresh).** `app/scheduler/runner.py` — find **due** `schedules` (cron / `next_run_at`), fire each as a **normal request/job** (§11.1), advance `last_run_at`/`next_run_at`, and write a `reports` row per run. This is the **scheduled** path; T9.4 is the **manual** path (same generator skills).
+  - *Validate:* `tests/test_scheduler.py` — a due schedule fires once, advances `next_run_at`, writes a `reports` row; a not-yet-due one does **not** fire.
+- ✅ **Checkpoint P9** — dashboard shows requests, system, and data products; products refresh both **on schedule** and **on demand**.
 
 ---
 
@@ -301,7 +316,7 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 ---
 
 ## Open decisions to confirm during review
-1. **Models config shape.** Keep the current single `config/models.yaml` (roles+providers), or migrate to the spec's `config/models/` folder + `model-bindings.yaml` (§7.0)? *(Recommend: keep single-file for now; revisit at P3.)*
+1. **Models config shape — decide before P3.** Keep the current single `config/models.yaml` (roles+providers), or migrate to the spec's `config/models/` folder + `model-bindings.yaml` (§7.0)? This **blocks P3** (templates, per-agent-role overrides, provider selection all key off it) and churns later if changed mid-stream. *(Recommend: keep the single file through P6; add `model-bindings.yaml` only when a per-agent-role override is actually needed.)*
 2. **Per-job concurrency mechanism.** True child **processes** (spec's isolation, §6A) vs **asyncio tasks** for a single-user local app? *(Recommend: start with asyncio tasks + the same recovery contract; revisit if isolation matters.)*
 3. **`sqlite-vec` dependency** for vectors (P5.2) — acceptable to add, or prefer a pure-Python fallback first?
 4. **Web frontend scope** (P9.6) — full React/Vite now, or REST + a minimal HTML page until later?
