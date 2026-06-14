@@ -52,6 +52,7 @@ validated and audited before any action is taken.
 | Memory management | **Weighted + TTL memory** with decay, **reinforcement on use _or_ read** (a memory/archived-report **read** refreshes TTL + weight and revives a cold item), consolidation/forgetting, archival; bounded total (§9.1). |
 | Chat platforms | **Unified adapter**, **Telegram first**; Feishu + Teams later |
 | Users | **Single user** now; multi-user later (tenancy hierarchy already built in) |
+| Access control | **Bot paired to a single owner.** Only a **paired** chat identity may talk to the bot; pairing **reuses the GitHub device flow** (OpenClaw/Hermes, §7.2) to bind a channel account to the **owner GitHub account**; the Gateway **refuses + audits** every unpaired sender (§10.1). |
 | Deployment | **Local-first**, **chat-first**; web server + proactive reports later |
 | Control policy | Triage (see §6): clear simple ask → **auto** (incl. search); unclear → clarify; complex → plan + expert sign-off |
 
@@ -146,7 +147,7 @@ flowchart TB
 
 ### Components
 - **Channel Adapters** — normalize inbound platform messages into a canonical `InboundMessage`; send replies via a canonical `OutboundMessage`. Handle webhooks/long-poll, attachments, identity.
-- **Gateway / Ingress** — authenticate/identify user, resolve cross-channel identity, load/create session, enqueue work.
+- **Gateway / Ingress** — authenticate/identify user, **enforce the paired-owner allowlist (reject unpaired senders — §10.1)**, resolve cross-channel identity, load/create session, enqueue work.
 - **Orchestrator / Router (control path)** — routes each task to the right agent worker by `(tenant, workspace, feature)`; owns the deterministic state machine contract: triage → clarify/plan/execute → validate → reply → record.
 - **Agent Supervisor & Workers** — a pool of **isolated child processes**, one per running feature, that hold the warm session/cache and run the per-task state machine. See §6A.
 - **Skill Registry & Runtime** — registered skills with JSON-Schema params; validates params, enforces permissions, executes, captures result + provenance.
@@ -699,7 +700,7 @@ If you prefer the **GitHub Models** REST surface instead of Copilot: set `GITHUB
 #### Token cache & security
 - The raw OAuth token, the **exchanged Copilot token**, and any refresh token live in a **local, git-ignored, permission-restricted cache** (e.g. `data/.auth/github.json`) — **never** in SQLite, logs, or the audit trail. The exchanged Copilot token is short-lived and auto-refreshed.
 - Only a **public client ID** appears in config; no client secret is needed for device flow.
-- `python -m app.cli.login` runs the flow; `python -m app.cli.verify` confirms a token works (lists a few models + a tiny completion).
+- `python -m app.cli.login` runs the flow; `python -m app.cli.verify` confirms a token works (lists a few models + a tiny completion); `python -m app.cli.pair` pairs a chat account to the owner (§10.1).
 
 **Planned components (illustrative reference files already in the repo; device-flow parts are new for Phase 0)**
 - `config/models/` + `config/model-bindings.yaml` *(planned)* — model definitions (kind/model/`api_key_env`) and role→model bindings (`github_copilot` default, `github_models` alternative).
@@ -708,6 +709,7 @@ If you prefer the **GitHub Models** REST surface instead of Copilot: set `GITHUB
 - [backend/app/advisor/providers.py](../backend/app/advisor/providers.py) — `GitHubCopilotProvider` (Route A) and `GitHubModelsProvider` (Route B) + generic `openai_compatible`/`ollama`; each asks `auth` for its token and sets the right headers.
 - [backend/app/advisor/redaction.py](../backend/app/advisor/redaction.py) — scrubs secrets before any call/log (§12).
 - `backend/app/cli/login.py` *(planned)* + [backend/app/cli/verify.py](../backend/app/cli/verify.py) — run the login and confirm it works.
+- `backend/app/cli/pair.py` *(planned)* — pair a **chat account** to the owner: runs the device-flow **owner challenge** (reuses `auth.py`) or mints/lists/revokes one-time **host pairing codes**; writes the `user_identities` allowlist binding (§10.1).
 
 > **Decision:** we use the **OpenClaw/Hermes approach — Route A (Copilot device flow)** as the **default**, matching the tools you referenced. Note it authenticates as the Copilot editor integration and relies on the **undocumented `copilot_internal` token-exchange** endpoint, which GitHub could change; if that ever breaks, the same abstraction falls back to **Route B (GitHub Models PAT)** or your **own GitHub App** with **no code changes** (just a `config/models/` edit). We'll pin the client ID + editor headers in one place (`auth.py`) to make any future update trivial.
 
@@ -977,8 +979,9 @@ The **request → job → plan → phase → task** hierarchy (§5, §6B) is mir
 
 | Table | Key columns |
 |-------|-------------|
-| `users` | id, display_name, created_at |
-| `user_identities` | user_id, channel, channel_user_id (cross-channel mapping) |
+| `users` | id, display_name, github_login (nullable), is_owner(bool, default false), created_at *(the **owner** is the GitHub account from the device-flow login — §10.1)* |
+| `user_identities` | user_id, channel, channel_user_id, state(pending\|paired\|revoked, default pending), paired_via(device_flow\|host_code, nullable), paired_at (nullable) *(cross-channel mapping **+ pairing allowlist** — only `paired` rows may chat — §10.1)* |
+| `pairing_codes` | id, code, user_id (owner), channel (nullable until claimed), channel_user_id (nullable until claimed), device_code (nullable → GitHub device-flow mode), state(pending\|consumed\|expired\|revoked), expires_at, consumed_at, created_at *(single-use chat-pairing codes / device-flow challenges — §10.1)* |
 | `user_traits` | user_id, key, value, source, confidence, updated_at *(the "user characters": habit/liking/location…)* |
 | `sessions` | id, user_id, channel, status, started_at |
 | `messages` | id, session_id, direction, content, raw_json, created_at |
@@ -1198,7 +1201,55 @@ class ChannelAdapter(Protocol):
 - **Feishu/Lark (later):** event subscription + message API; signature verification.
 - **Teams (later):** Bot Framework / Graph; OAuth.
 
-`InboundMessage` carries `{channel, channel_user_id, text, attachments[], thread/session hints, raw}`; identity resolution maps it to a `users` row via `user_identities`.
+`InboundMessage` carries `{channel, channel_user_id, text, attachments[], thread/session hints, raw}`; identity resolution maps it to a `users` row via `user_identities` — and **only a `paired` identity is admitted** (§10.1).
+
+### 10.1 Bot ↔ owner pairing & allowlist
+
+A chat bot is **publicly reachable** — anyone who finds it on Telegram/Feishu/Teams can message it. Because this is a **single-user, local-first** system (§2), the bot must **refuse everyone except its paired owner**. Pairing **reuses the GitHub device flow** (OpenClaw/Hermes, §7.2) already used for login: the chat user proves control of the **owner GitHub account**, and the bot binds their channel identity to the owner.
+
+**Owner identity.** The **owner** is the **GitHub account from the device-flow login** (§7.2) — the Copilot-entitled account the bot runs as — mapped to a single `users` row (`is_owner = true`, `github_login`). Optionally pinned via **`OWNER_GITHUB_LOGIN`** so the match target is explicit.
+
+**Pair a chat account — primary: device-flow challenge.**
+1. **Unpaired message → challenge.** An unpaired sender messages the bot. The Gateway creates **no request**; the PM replies with a device-flow **`user_code`** + `https://github.com/login/device` (the §7.2 flow, scope `read:user`).
+2. **Approve as owner.** The user approves in the browser **with the owner's GitHub account**.
+3. **Verify owner.** The bot polls, receives the `gho_` token, reads `GET /user`, and checks `login == owner`. The raw token is used **only** for this check and **discarded** (never stored — the chat user isn't logging in for LLM use).
+4. **Bind.** On match → write a `user_identities` row `(channel, channel_user_id) → owner`, `state = paired`, and confirm in chat. A **non-owner** login is **refused + audited**.
+
+**Pair a chat account — alternative: host one-time code.** When the operator has shell access and prefers not to re-auth: `python -m app.cli.pair` mints a short, **single-use** code (TTL default 10 min) into `pairing_codes`; the operator sends **`/pair <code>`** from the chat account; the Gateway verifies + binds as above. The code is readable only on the host the operator controls (same trust basis as the token cache, §7.2), so possessing it proves ownership.
+
+**Enforcement (allowlist).** The Gateway checks every inbound message's `(channel, channel_user_id)` against **paired** `user_identities`:
+- **Paired →** proceed (identity resolved, session loaded, request routed — §6C).
+- **Unpaired / unknown →** **no request or job is created**; the PM sends a single “pair first” reply (or stays silent per `policies.yaml`) and writes an `audit_log` row. Refusals are **rate-limited** to resist probing.
+
+**Lifecycle.**
+- **Multiple channels** bind to the same owner — pair once per channel (Telegram, then Feishu…), all rows pointing at the owner via the cross-channel `user_identities` map.
+- **Revoke** with `python -m app.cli.pair --revoke <channel:user>` (or web **Settings**) → `state = revoked`; that account can no longer chat.
+- **Multi-user later** (§2): the same flow issues challenges/codes per user; the allowlist becomes the membership list — tenancy is already built in.
+
+```mermaid
+sequenceDiagram
+  participant User as Chat user
+  participant PM as Bot / Gateway
+  participant GH as github.com
+  participant API as api.github.com
+  User->>PM: first message (unpaired)
+  PM-->>User: user_code + https://github.com/login/device
+  User->>GH: approve with OWNER GitHub account
+  loop poll (respect interval)
+    PM->>GH: POST /login/oauth/access_token
+    GH-->>PM: authorization_pending | access_token (gho_)
+  end
+  PM->>API: GET /user (Authorization: token gho_)
+  API-->>PM: { login }
+  alt login == owner
+    PM->>PM: bind (channel,user) -> owner; state=paired
+    PM-->>User: "Paired — you can chat now."
+  else login != owner
+    PM-->>User: "Refused." + audit_log
+  end
+```
+
+> Pairing and the allowlist are **deterministic** — the model is never consulted on who may chat. Only a chat account that approved the device flow **as the owner** (or presented a host-minted owner code) is admitted; the raw GitHub token used to verify is discarded, keeping the bot closed without storing a second credential.
 
 ---
 
@@ -1218,7 +1269,7 @@ class ChannelAdapter(Protocol):
 - **Reports & Data Products** — outputs generated by jobs/schedules: the **daily interest report**, **weather** for saved locations, **fishing tips**, **investment suggestions** for a predefined watchlist, **real-time prices** for a predefined list, etc. Each product shows its **latest result + run history**, supports **Refresh now** (re-runs its generator skills via code, on top of the scheduled auto-refresh), and download/share (§11.1).
 - **System** — host **CPU / memory / disk** usage and per-process (company + per-job) resource use; the **AI models** in use (from `config/models/` + `model-bindings.yaml`) with **usage** aggregated from `ai_calls` (calls, tokens, latency, error/validation rates per model & role); provider **login/token status** (device-flow §7.2) and the **max-3** concurrency slots (in-use / queued).
 - **Profiles** — user traits (characters) with source/confidence.
-- **Settings** — model-roles/providers, skills catalog (read-only schemas), channels, policies, schedules.
+- **Settings** — model-roles/providers, skills catalog (read-only schemas), channels, **paired accounts (pair / revoke — §10.1)**, policies, schedules.
 
 > The **System** page is read-only monitoring: CPU/mem/disk come from a deterministic host-metrics service (REST endpoint over the same FastAPI app), and model usage is a straight aggregation of the `ai_calls` audit table — no AI in the loop.
 
@@ -1245,6 +1296,7 @@ Proactive **schedules** are **created on demand — when the user asks for one**
 - **Never write secrets to logs.** The same detection runs on log/audit records: secrets and env values are scrubbed before anything is written to `process.log`, `audit_log`, or `ai_calls` prompt/response refs. Logs prefer **references** (ids/paths) over raw content.
 - **Never show secrets to the user.** PM outbound messages pass the same guard, so a token can't leak into a chat reply or a final report.
 - **PII is not redacted (your choice).** Personal data (emails, phones, addresses) is sent as-is and may be saved as **user characters**; only **secrets** are stripped. *(A config toggle for PII redaction is noted as a future option, off by default.)*
+- **Bot access is allowlisted to the paired owner.** A chat account can reach the bot only after **pairing** (§10.1): it proves ownership via the **GitHub device flow** (same mechanism as login, §7.2) and is bound to the owner in `user_identities`. The Gateway **refuses every unpaired sender** (single refusal + `audit_log` entry, rate-limited), so a publicly-reachable bot token still can't be used by anyone but the owner. Revoke from the CLI or web **Settings**.
 - **Local-first**: no outbound calls unless a skill explicitly performs them.
 - Channel webhook **signature verification** on all inbound events.
 
@@ -1278,6 +1330,8 @@ Proactive **schedules** are **created on demand — when the user asks for one**
 - **Device flow** — OAuth 2.0 device authorization grant: the app shows a code, you approve in the browser, the app receives the token (§7.2).
 - **Route A / Route B** — GitHub login options: **A** = Copilot device flow (public client ID + `copilot_internal` token exchange, no app registration); **B** = GitHub Models PAT (`models: read`) (§7.2).
 - **Token exchange** — swapping a raw GitHub OAuth token (`gho_…`) for a short-lived Copilot API token via `copilot_internal/v2/token`, cached and auto-refreshed (§7.2).
+- **Owner** — the single GitHub account (from the device-flow login, §7.2) the bot belongs to; the only identity allowed to chat, optionally pinned via `OWNER_GITHUB_LOGIN` (§10.1).
+- **Pairing** — binding a chat account (`channel + channel_user_id`) to the **owner** by proving control of the owner's GitHub account via the device flow (or a host-minted one-time code), after which the Gateway **allowlists** that account; unpaired senders are refused (§10.1).
 - **Request id / code** — a timestamp reference `YYYYMMDDHHmmSS` addressed as `/req <id>`, assigned to every request to multiplex concurrent work (§6C).
 - **Request title** — an AI-drafted, user-editable name shown in every PM message about a request (§6C).
 - **Progress update** — a PM message (tagged with request id + title) posted at each phase sign-off / major status change (§6C).
