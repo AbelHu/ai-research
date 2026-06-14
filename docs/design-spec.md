@@ -38,7 +38,7 @@ validated and audited before any action is taken.
 |------|----------|
 | Backend language | **Python** (FastAPI) |
 | Frontend | **FastAPI REST + lightweight React/TS** (Vite); built later (chat first) |
-| Memory/search | **Hybrid**: SQLite **FTS5** + **in-SQLite vector (`sqlite-vec`)**; per-task **cards** (tags + short description) |
+| Memory/search | **Hybrid**: SQLite **FTS5** + **in-SQLite vector (`sqlite-vec`)**; per-task **cards** (keywords + tags + short description) |
 | AI providers | **Provider abstraction**; **model definitions in a folder** (`config/models/`), tokens from env. **Login via OAuth device flow** to **GitHub Copilot** (well-known client ID, **no app registration** — per OpenClaw/Hermes); **GitHub Models PAT** / OpenAI / Azure / Ollama swappable. Per-role model assignment is **auth/endpoint only — no shared skills/memory** (§7/§7.2). |
 | Web/live search | **Bing Web Search API** via a deterministic `web.search` skill (GitHub Models has no native web-search tool); anti-crawl-aware |
 | Secrets | **Env variables are secrets**: never written to logs, never sent to any AI model in a request, never shown to the user. Secret redaction guard before every model call/log/reply; **PII not redacted**. |
@@ -48,8 +48,8 @@ validated and audited before any action is taken.
 | Completion | On finish, the **final report (incl. “what could improve”) is sent to the user for confirmation**; a confirmed improvement starts a **new bounded job** (no forced generalize phase). |
 | Concurrency | **Max 3** concurrent complex-job processes (configurable); simple asks handled in the company process. **Multiple requests multiplexed** — each has a **`/req <id>` (`YYYYMMDDHHmmSS`) + title**; user can ask progress, interrupt, pause, or abandon; PM posts **progress updates** per request (§6C). |
 | AI sessions | **Senior Worker & Plan Expert keep a warm AI session/cache** (recoverable on crash); **PM, Boss, Analyzer, Junior Worker, Company Expert, Librarian are transient** — Junior Worker drops idle sessions after ~15 min (§6A). |
-| Library & recovery | Finished work saved to **local folders** (`Simple/`, `Active/`, `Archive/`) + **DB & index file**; **all roles read** by keywords/tags/description; only the **Librarian** writes the archive/DB; **all state recoverable** from folders + DB (§9). |
-| Memory management | **Weighted + TTL memory** with decay, reinforcement, consolidation/forgetting, archival; bounded total (§9.1). |
+| Library & recovery | Finished work saved to **local folders** (in-flight under `Active/` split by kind — `Simple/`, `Tasks/`, `Features/` — then `Archive/`) + **DB & index file**; **all roles read** by keywords/tags/description; only the **Librarian** writes the archive/DB; **all state recoverable** from folders + DB (§9). |
+| Memory management | **Weighted + TTL memory** with decay, **reinforcement on use _or_ read** (a memory/archived-report **read** refreshes TTL + weight and revives a cold item), consolidation/forgetting, archival; bounded total (§9.1). |
 | Chat platforms | **Unified adapter**, **Telegram first**; Feishu + Teams later |
 | Users | **Single user** now; multi-user later (tenancy hierarchy already built in) |
 | Deployment | **Local-first**, **chat-first**; web server + proactive reports later |
@@ -179,13 +179,13 @@ flowchart LR
 
 | Kind | Definition | Plan? | Where it runs | Folder |
 |------|-----------|-------|---------------|--------|
-| **Ask** | Only needs search + answer. *E.g. "What's the weather this weekend?"* | No | **Company process** — assigned to the **Junior Worker** | shared `Simple/` |
-| **Task** | A **complex** job that does **not** require new code to repeat, though it may still **produce reusable functions/skills** and **save user characters**. *E.g. "Compare these three vendors and recommend one."* | Yes | **Per-job process** | own folder in `Active/` |
-| **Feature** | Needs **new code / a new skill** so the capability can be **repeated** later. *E.g. "Send me a daily report on my interests."* | Yes | **Per-job process** | own folder in `Active/` |
+| **Ask** | Only needs search + answer. *E.g. "What's the weather this weekend?"* | No | **Company process** — assigned to the **Junior Worker** | shared `Active/Simple/` |
+| **Task** | A **complex** job that does **not** require new code to repeat, though it may still **produce reusable functions/skills** and **save user characters**. *E.g. "Compare these three vendors and recommend one."* | Yes | **Per-job process** | own folder in `Active/Tasks/` |
+| **Feature** | Needs **new code / a new skill** so the capability can be **repeated** later. *E.g. "Send me a daily report on my interests."* | Yes | **Per-job process** | own folder in `Active/Features/` |
 
-- **Task + Feature = a "complex job."** Both get a **plan**, a dedicated **process**, an `Active/` folder, expert **sign-off**, and a **final report**.
+- **Task + Feature = a "complex job."** Both get a **plan**, a dedicated **process**, an `Active/Tasks/` or `Active/Features/` folder (by kind), expert **sign-off**, and a **final report**.
 - **A feature job produces reusable code/skills as part of its plan** (its deliverable); a task job may produce helpers opportunistically. There is **no forced "generalize" phase** — broader improvements are handled by the **final-report → improvement-job loop** (§6B).
-- **Asks** are the fast path: no plan, no separate process, answered (with validated sources) by the Junior Worker and logged under `Simple/`.
+- **Asks** are the fast path: no plan, no separate process, answered (with validated sources) by the Junior Worker and logged under `Active/Simple/`.
 - **Every** job — ask, task, feature — ends with a **final report + experience ("gain")**: the report is **sent to the user for confirmation** and then distilled into memory/skills and archived (§9.2). The gain's *improve* notes can spawn a **new improvement job** if the user confirms (§6B).
 
 ### Classification labels
@@ -329,7 +329,7 @@ The model API itself is **stateless** (every call re-sends its context). On top 
 
 | Role(s) | Warm AI session? | Rationale |
 |---------|------------------|-----------|
-| **Senior Worker, Plan Expert** | **Yes — maintained by the role.** Keep the full cached memory/context for the job and reuse it across steps/phases; **persist enough to recover** the session after a restart/crash (rebuilt from the job's `Active/<id>/` folder + DB). | They work a single complex job over many steps where context compounds — caching pays off and continuity matters. |
+| **Senior Worker, Plan Expert** | **Yes — maintained by the role.** Keep the full cached memory/context for the job and reuse it across steps/phases; **persist enough to recover** the session after a restart/crash (rebuilt from the job's `Active/<kind>/<id>/` folder + DB). | They work a single complex job over many steps where context compounds — caching pays off and continuity matters. |
 | **Junior Worker** | **No long session.** May hold a short session, but it is **dropped after a configurable idle period (default 15 min)** with no user ask. | Successive asks are usually **different topics**, so a stale session adds little and wastes memory. |
 | **PM, Company Expert, Librarian** | **No long session.** Invoked transiently; rebuild the little context they need per invocation. | Their work is short, bursty, and not context-compounding; no need to hold a cache. |
 | **Boss, Analyzer** | **No session.** Boss is mostly deterministic control. The **Analyzer caches nothing** — everything it needs for a job is in the job's folder + the library, fetched on demand. | One-shot per decision; fully recoverable from folders/DB. |
@@ -338,7 +338,7 @@ The model API itself is **stateless** (every call re-sends its context). On top 
 - **Idle reaping.** A background timer drops idle Junior-Worker sessions (default 15 min, `policies.yaml: junior_session_idle_minutes`) and may shrink other transient caches to bound memory.
 
 ### State, isolation & recovery
-- **Per-job working folder.** Each complex job gets a folder under `Active/<request-id>/` (named by the linked request's id, the user-facing handle) holding its plan, phase/task artifacts, process log, and draft reports. Simple-ask jobs share `Simple/`.
+- **Per-job working folder.** Each complex job gets a folder under `Active/Tasks/<request-id>/` or `Active/Features/<request-id>/` (grouped by kind; named by the linked request's id, the user-facing handle) holding its plan, phase/task artifacts, process log, and draft reports. Simple-ask jobs share `Active/Simple/`.
 - **Durable truth = folders + DB.** SQLite holds structured state (requests, jobs, plans, phases, tasks, statuses, memory, index); folders hold artifacts and reports. **All state is recoverable** from folders + DB — a crashed/terminated process is rebuilt from them.
 - **Isolation.** Per-job processes share nothing in memory; they coordinate with the company process over IPC (a task/result queue) and through the DB. A crash in one job can't affect others.
 - **Warm vs durable.** Only **Senior Worker** and **Plan Expert** keep a warm AI session/cache (recoverable as above); all other roles are transient. Either way, **no cache is ever the source of truth** — it is always reconstructable from folders/DB.
@@ -479,7 +479,7 @@ When a message arrives, the system decides whether it **starts a new request** o
 This keeps AI out of the control path: the Analyzer only **advises** the new-vs-append label; deterministic code applies the confident cases and defers to the user (via the PM) when unsure. A **pending clarifying question** strongly biases the next unaddressed message toward **append** to the request that asked.
 
 ### Delivering details to the right request
-- New details for a running complex job are queued to **that job's process** (its `Active/<request-id>/` folder + inbox); the Boss **pauses the job** (`paused`), has the **Analyzer** add/update phases & tasks, then **resumes** — under the normal plan/sign-off rules (no mid-flight corruption).
+- New details for a running complex job are queued to **that job's process** (its `Active/<kind>/<request-id>/` folder + inbox); the Boss **pauses the job** (`paused`), has the **Analyzer** add/update phases & tasks, then **resumes** — under the normal plan/sign-off rules (no mid-flight corruption).
 - Up to **3 complex jobs run concurrently** (§6A); extras queue with status shown to the user.
 
 ### User actions on a running job
@@ -512,7 +512,7 @@ flowchart TD
   AZ --> ROUTE[Simple ask -> Junior Worker answers; task/feature -> plan + per-job process]
 ```
 
-> Concurrency is bounded and deterministic: ids/titles are assigned by code, routing decisions are validated, and each job's state lives in its own `Active/<request-id>/` folder + DB rows — so parallel jobs never share working state, and the user can always tell them apart.
+> Concurrency is bounded and deterministic: ids/titles are assigned by code, routing decisions are validated, and each job's state lives in its own `Active/<kind>/<request-id>/` folder + DB rows — so parallel jobs never share working state, and the user can always tell them apart.
 
 ---
 
@@ -872,11 +872,12 @@ backend/app/skills/
   registry.py     # @skill decorator, SkillSpec, catalog()
   runtime.py      # execute(): validation + policy + provenance
   policy.py       # permission + side-effect/confirmation rules
-  memory.py       # memory.search / memory.write / memory.tag
+  memory.py       # memory.search / memory.get / memory.write / memory.tag  (read refreshes TTL/weight)
   web.py          # web.search / web.fetch          (side-effecting)
   profile.py      # profile.get / profile.update
   task.py         # task.create / task.update / task.list
   report.py       # report.generate / report.deliver (used by proactive jobs)
+  library.py      # library.read (open archived report/folder; refreshes TTL/weight, revives cold)
   __init__.py     # imports submodules so @skill runs at startup (auto-discovery)
 ```
 Importing the package executes each `@skill`, populating `REGISTRY`. (Optional later: discover via entry-points so external packages can add skills — true "plugins".)
@@ -907,9 +908,11 @@ No model, no network — fully deterministic unit tests.
 
 | Skill | Side-effects | Purpose |
 |-------|--------------|---------|
-| `memory.search` | no | hybrid keyword+semantic recall |
+| `memory.search` | no | hybrid keyword+semantic recall (returns candidates; no reinforcement) |
+| `memory.get` | no† | read a specific memory by id/`entity_key`; **refreshes its TTL + weight** (reinforcement) |
 | `memory.write` | no* | store a distilled memory item (+ tags/summary) |
 | `memory.tag` | no* | add/adjust tags on a memory/task |
+| `library.read` | no† | open an archived final report/folder; **refreshes TTL + weight and revives** a cold item to hot |
 | `web.search` | yes (network) | search-API results (anti-crawl-friendly) |
 | `web.fetch` | yes (network) | fetch + extract a specific URL |
 | `data.query` | no | read local data sources |
@@ -919,6 +922,7 @@ No model, no network — fully deterministic unit tests.
 | `reply.send` / `clarify.ask` / `plan.propose` / `confirm.request` | yes | control/meta messaging |
 
 `*` local DB writes — gated by permissions, but don't leave the machine.
+`†` read-only on content, but performs a **reinforcement bookkeeping write** (`last_used_at`, `use_count`, `expires_at`, archived→active) committed by the Librarian; never needs user confirmation.
 
 ### 8.11 End-to-end trace (a clear simple ask)
 
@@ -943,8 +947,8 @@ Everything the AI did (triage label, proposal, draft) was schema-validated and l
 - **FTS5** — keyword/full-text indexes (mirrors of messages/memories/requests/reports).
 - **Vector index** — **in-SQLite via `sqlite-vec`**. Embeddings from the configured `embedder` role (hosted now; local-capable later).
 - **Local library (folders)** — the artifact store and on-disk record of work (§9.2):
-  - `data/library/Simple/` — all **simple asks** (shared).
-  - `data/library/Active/<request-id>/` — one folder per **in-flight** task/feature (plan, phase/task artifacts, process log, draft + final reports).
+  - `data/library/Active/Simple/` — all **simple asks** (shared).
+  - `data/library/Active/Tasks/<request-id>/` and `data/library/Active/Features/<request-id>/` — one folder per **in-flight** task / feature job respectively (plan, phase/task artifacts, process log, draft + final reports), grouped by kind.
   - `data/library/Archive/` — finished requests, moved here on completion.
 - **Index file** — an on-disk index (`data/library/index.*`) mapping **keywords/tags/brief descriptions → folder paths**, kept in sync with the DB so the folders are searchable even outside SQLite. *(Keywords/tags/descriptions live in **both** the DB and this index file — DB for important-thing memory, index file for folder search.)*
 - **Blob store** — `data/blobs/…` for binary artifacts/attachments referenced by the library.
@@ -977,8 +981,8 @@ The **request → job → plan → phase → task** hierarchy (§5, §6B) is mir
 | `embeddings` | object_type, object_id, vector |
 | `artifacts` | id, job_id, path, mime, created_at |
 | `user_interests` | user_id, topic, weight, source, updated_at *(drives proactive reports)* |
-| `schedules` | id, kind, schedule_cron, params_json, enabled, created_by_request, last_run_at, next_run_at *(on-demand scheduler; also hosts the **daily 24h TTL-maintenance** job; “schedule” avoids clashing with the work-unit `jobs` table)* |
-| `reports` | id, user_id, schedule_id, title, summary, artifact_id, delivered_at, created_at *(proactive digests; distinct from `final_reports`)* |
+| `schedules` | id, kind, schedule_cron, params_json, enabled, created_by_request, last_run_at, next_run_at *(on-demand scheduler; `params_json` holds the **data product's predefined inputs** — watchlist / locations / topics — + its generator skills; also hosts the **daily 24h TTL-maintenance** job; “schedule” avoids clashing with the work-unit `jobs` table)* |
+| `reports` | id, user_id, schedule_id, title, summary, artifact_id, delivered_at, created_at *(proactive digests **& data-product runs**; one row per run → refresh/run history per product; distinct from `final_reports`)* |
 | `audit_log` | id, actor(system\|ai\|user\|role), action, target, payload_json, created_at |
 | `*_fts` | FTS5 virtual tables mirroring messages/memories/requests/final_reports/library_index |
 
@@ -995,13 +999,14 @@ The **request → job → plan → phase → task** hierarchy (§5, §6B) is mir
 - **Dedup / consolidation.** A periodic job merges near-duplicate memories and rolls many cards into a higher-level summary ("project digest").
 - **Provenance on every memory.** Each memory/card links back to its source messages/steps so answers can cite where a fact came from.
 - **Hybrid ranking.** Merge FTS + vector with a simple reranker (e.g., reciprocal-rank fusion); all knobs in config, all deterministic.
+- **Keywords *and* tags — keep both (decided).** They are complementary, not redundant. **Keywords** are *uncontrolled, extracted terms* (the specific words of this request) that maximize **FTS recall** — they match however the user later phrases a search and need no vocabulary upkeep. **Tags** are *normalized labels from a controlled vocabulary* that give consistent **faceted filtering/grouping** (e.g. `vendor-comparison`, `pref`, `location`) and clean cross-request joins. Keywords cast a wide net; tags keep it organized — so every final report carries **both**, and we index/search on both.
 - **Tag taxonomy.** AI *suggests* tags; code normalizes them against a controlled vocabulary so tags stay consistent and filterable.
 
 ### Memory lifecycle
 1. After each request, the advisor **distills** durable memory items, the **final report** (keywords + tags + brief description + **gain**, §9.2), trait updates, and **suggests `importance` + `retention_class` + tags**; code **validates** them and the **Librarian** writes them (DB + index file + folder).
 2. New reports/memories/messages are **embedded** (configured embedder) and **FTS-indexed**; tags normalized to the taxonomy.
 3. On a new request, the Analyzer retrieves context via **hybrid search** (FTS + vector, RRF-merged, weighted by effective weight §9.1) over the library — final reports first, then drill into the request's `steps`.
-4. **Reinforcement:** items actually used in a validated answer get their weight/TTL refreshed (§9.1).
+4. **Reinforcement (use *or* read):** items **used** in a validated answer **or deliberately read/opened** via a read function (`memory.get`, `library.read`) get their weight/TTL refreshed — and an **archived** item that is read is **revived** to the hot index (§9.1).
 5. Profile/`user_traits` updated from extracted, validated **user characters** (with source + confidence) — done by the Company Expert when warranted.
 6. A periodic **consolidation/forgetting job** decays, archives, merges, and drops memories (§9.1) and refreshes `user_interests` that feed proactive reports.
 
@@ -1014,7 +1019,7 @@ Memory must stay **small, fresh, and useful**. The retention mechanism is a **TT
 #### TTL — the retention clock
 - **Everything saved has a TTL.** On write, each memory/task gets `expires_at = now + base_ttl(retention_class, importance)`.
 - **Daily sweep (every 24h).** A deterministic maintenance job re-evaluates every active item: recompute weight/decay, and if `now ≥ expires_at` → **drop** when low-importance & unreferenced, else **archive** (recoverable) when important. `core` never expires.
-- **Use extends TTL (refresh).** Whenever an item is retrieved *and* used in a validated answer/step, set `last_used_at = now`, bump `use_count`, and push `expires_at` forward by an importance-scaled amount. Frequent/important use → effectively permanent; one-off, unimportant items → expire on schedule.
+- **Use *or* read extends TTL (refresh).** Reinforcement fires on **two** triggers: an item **used** in a validated answer/step, **or** an item **deliberately read/opened** through a read function (`memory.get`, `library.read` — §8.10). On either, set `last_used_at = now`, bump `use_count`, and push `expires_at` forward by an importance-scaled amount — so each read slides the item's expiry **past whatever it was scheduled to be before the read**, keeping a memory alive longer than (and beyond) the job/plan that consulted it. Frequent/important use → effectively permanent; one-off, unimportant items → expire on schedule. *(Merely appearing as a **candidate** in a `memory.search` result set is **not** a trigger — only a deliberate read/consult is — so speculative searches can't inflate weights.)*
 - **Net effect (your rule).** “A saved task/memory is dropped if it is not important **and** not referenced within its TTL” — exactly the drop condition; referenced or important items are kept (kept hot, or archived), and the total stays bounded.
 
 #### Per-item attributes
@@ -1042,8 +1047,16 @@ $$w_{\text{eff}} = importance \times \underbrace{e^{-\lambda\,\Delta t}}_{\text{
 
 where $\Delta t$ = time since `last_used_at` (else `created_at`); $\lambda$ is the class decay rate ($\lambda = 0$ for `core` → no decay); $\beta$ is the reinforcement coefficient. **All knobs live in `policies.yaml`** — no model involved, fully deterministic.
 
-#### Reinforcement (refresh)
-When an item is retrieved **and** used in a validated answer/step: bump `use_count`, set `last_used_at = now`, slide `expires_at` forward, and nudge `importance` up (bounded). → Useful memories stay alive; unused ones decay.
+#### Reinforcement (refresh) — on use *or* read
+Reinforcement is triggered by **either** signal:
+- **Used** — the item is cited in a validated answer/step (the strong signal).
+- **Read/consulted** — the item is fetched by a **read function**: `memory.get` for a memory, `library.read` for an archived final report/folder (§8.10). A read is itself proof the item is still useful, so the read **must** refresh it.
+
+On either trigger: bump `use_count`, set `last_used_at = now`, slide `expires_at` forward (importance-scaled), and nudge `importance` up (bounded). → Useful memories stay alive; unused ones decay. A read therefore keeps an item **longer than its pre-read scheduled expiry**.
+
+**Reviving archived items.** If the read targets an **archived** (cold) item, the refresh also **revives** it: `state archived → active`, re-added to the hot FTS/vector index so the next lookup is cheap. A read never destroys a cold item — it only strengthens it.
+
+**Writer authority.** A reinforcement touch is a low-stakes bookkeeping write to `memories`/`requests` (`last_used_at`, `use_count`, `expires_at`, `state`, bounded `importance`). To honor the single-writer rule (§6A), the read **emits** the touch and the **Librarian commits** it, but it is applied **immediately** (not deferred to the daily sweep) so the extended TTL takes effect at once. Only these reinforcement fields change on a read; content is never modified.
 
 #### Supersede / update — the location case
 Facts sharing an `entity_key` form a **version chain**. Writing a conflicting value (high confidence) marks the old one `superseded_by` and `archived`; the new value starts fresh. Repeated confirmations raise the new value's importance/confidence; the stale value decays and is eventually dropped. → "location needs updating after many confirmations" is exactly this chain; and a long-untouched fact eventually archives even if it was once important.
@@ -1052,7 +1065,7 @@ Facts sharing an `entity_key` form a **version chain**. Writing a conflicting va
 Deterministic pipeline run by the **every-24h TTL-maintenance job** (AI only *suggests* summaries, which are validated):
 1. **Expire (TTL)** — any item past `expires_at` that is low-importance & unreferenced → `dropped` (soft-delete, later purged); important ones → `archived` instead.
 2. **Decay** — recompute `w_eff` for active items; shorten/extend `expires_at` from importance + recent use.
-3. **Archive** — `long` items below `τ_archive` & stale → `archived` to cold store, removed from the hot FTS/vector index (recallable on explicit deep search).
+3. **Archive** — `long` items below `τ_archive` & stale → `archived` to cold store, removed from the hot FTS/vector index (recallable on explicit deep search; **reading an archived item revives it to hot** and refreshes its TTL — see *Reinforcement*).
 4. **Consolidate** — cluster near-duplicate `short`/`episodic` items → one validated summary; originals archived/dropped. **`core` is never consolidated.**
 5. **Promote** — sustained high `w_eff`/`use_count` moves `short → long`; `→ core` only by explicit pin.
 6. **Budget enforce** — if the hot index exceeds its soft cap, evict the lowest-`w_eff` **non-core** items (archive medium, drop low) until under cap.
@@ -1061,7 +1074,7 @@ Deterministic pipeline run by the **every-24h TTL-maintenance job** (AI only *su
 
 #### Tiered storage keeps the total bounded
 - **Hot** = `active` items in FTS + vector index → default retrieval.
-- **Cold** = `archived` items, compressed, excluded from the hot index → recalled only on explicit deep search.
+- **Cold** = `archived` items, compressed, excluded from the hot index → recalled only on explicit deep search; a **read revives** a cold item back to hot and refreshes its TTL.
 - **Dropped** = soft-deleted, later purged (audit keeps a tombstone reference, not content).
 - **Core** = always hot/pinned, never compressed or dropped.
 
@@ -1082,20 +1095,23 @@ Every request — **ask, task, or feature** — produces a **final report** and 
 #### Folder library
 ```
 data/library/
-  Simple/                         # all simple asks (shared)
-    <ask-id>/                     # request log + final report
-  Active/                         # in-flight tasks/features (one folder each)
-    <request-id>/
-      plan.json                   # plan -> phases -> tasks (mirrors DB)
-      phases/<n>/...              # per-phase artifacts + phase report
-      process.log                 # the recorded process (skills, params, results)
-      final_report.md             # assembled at the end
-      artifacts/...               # produced files
-  Archive/                        # finished requests, moved here on completion
+  Active/                           # all in-flight work, grouped by kind
+    Simple/                         # all simple asks (shared)
+      <ask-id>/                     # request log + final report
+    Tasks/                          # Kind:Task jobs (one folder each)
+      <request-id>/
+        plan.json                   # plan -> phases -> tasks (mirrors DB)
+        phases/<n>/...              # per-phase artifacts + phase report
+        process.log                 # the recorded process (skills, params, results)
+        final_report.md             # assembled at the end
+        artifacts/...               # produced files
+    Features/                       # Kind:Feature jobs (one folder each)
+      <request-id>/...              # same layout as a Task folder (+ generated code/skills)
+  Archive/                          # finished requests, moved here on completion
     <yyyy>/<request-id>/...
-  index.json                      # keyword/tag/description -> folder path map
+  index.json                        # keyword/tag/description -> folder path map
 ```
-- **Simple asks** share `Simple/`; **tasks/features** get their own `Active/<request-id>/` folder while running.
+- **Simple asks** share `Active/Simple/`; **task** jobs get their own `Active/Tasks/<request-id>/` and **feature** jobs their own `Active/Features/<request-id>/` folder while running.
 - On completion, the **Librarian** moves the folder to `Archive/` and updates the DB + `index.json`.
 - **Dual record (your rule).** Keywords/tags/brief description are written to **both** the **DB** (`final_reports`, `library_index` — the memory of important things) and the **on-disk index file** (`index.json` — the folder search map). Either can answer "have we done something like this before?".
 
@@ -1107,8 +1123,8 @@ Produced for ask/task/feature; assembled by the Junior Worker (asks) or Plan Exp
   "request_id": "...",
   "kind": "ask | task | feature",
   "title": "short human title",
-  "keywords": ["...", "..."],
-  "tags": ["normalized", "tags"],
+  "keywords": ["free-form extracted terms", "uncontrolled \u2192 FTS recall"],
+  "tags": ["normalized-taxonomy-labels", "controlled vocab \u2192 faceted filter"],
   "brief_description": "1-3 sentence summary of what was asked and delivered",
   "outcome": "delivered | partial | abandoned",
   "result_ref": "path or db ref to the deliverable",
@@ -1140,7 +1156,7 @@ The **"gain"** is not just prose — a deterministic function turns the validate
 AI **drafts** the report and proposals; **code validates** them against schemas and the skill catalog; the **Company Expert** signs off; the **Librarian** commits. Nothing is promoted to a skill or memory without passing validation — keeping AI out of the control path even here.
 
 #### Recovery
-Because the plan/phase/task hierarchy lives in the DB and every artifact + report lives in the folders (with `index.json` mirroring the DB), **all state is recoverable**: a crashed or terminated process is rebuilt from `requests/jobs/plans/phases/plan_tasks/steps` + the request's `Active/` (or `Archive/`) folder. A paused job (`jobs.paused`) resumes from its checkpoint.
+Because the plan/phase/task hierarchy lives in the DB and every artifact + report lives in the folders (with `index.json` mirroring the DB), **all state is recoverable**: a crashed or terminated process is rebuilt from `requests/jobs/plans/phases/plan_tasks/steps` + the request's `Active/<kind>/` (or `Archive/`) folder. A paused job (`jobs.paused`) resumes from its checkpoint.
 
 ---
 
@@ -1172,18 +1188,27 @@ class ChannelAdapter(Protocol):
 - **Frontend:** React + TypeScript (Vite), kept lightweight (a focused dashboard, simple component library).
 
 **Pages (when built)**
-- **Dashboard** — recent sessions, requests, pending expert sign-offs.
+- **Dashboard** — recent sessions, requests, pending expert sign-offs; at-a-glance system health (links to **System**).
 - **Conversations** — browse/search messages (keyword + semantic).
-- **Requests** — ask/task/feature status, **plan → phase → task** timeline, per-step AI audit; **approve/decline** plans & phases.
+- **Requests** — live view of **current requests** with everything attached: the **job** (kind, `paused`), its **plan → phase → task** tree showing each item's status / owner role / dependencies, the recorded **steps** + per-step AI audit (`ai_calls`), and artifacts; **approve/decline** plans & phases and **pause / resume / abandon** a job.
 - **Library** — search archived requests by keyword/tag/description (DB + `index.json`); open folders, final reports & artifacts.
 - **Memory** — search by keyword/semantic, filter by tags; view sources & user characters.
-- **Reports** — generated digests (daily interest report, etc.) with download/share.
+- **Reports & Data Products** — outputs generated by jobs/schedules: the **daily interest report**, **weather** for saved locations, **fishing tips**, **investment suggestions** for a predefined watchlist, **real-time prices** for a predefined list, etc. Each product shows its **latest result + run history**, supports **Refresh now** (re-runs its generator skills via code, on top of the scheduled auto-refresh), and download/share (§11.1).
+- **System** — host **CPU / memory / disk** usage and per-process (company + per-job) resource use; the **AI models** in use (from `config/models/` + `model-bindings.yaml`) with **usage** aggregated from `ai_calls` (calls, tokens, latency, error/validation rates per model & role); provider **login/token status** (device-flow §7.2) and the **max-3** concurrency slots (in-use / queued).
 - **Profiles** — user traits (characters) with source/confidence.
 - **Settings** — model-roles/providers, skills catalog (read-only schemas), channels, policies, schedules.
 
+> The **System** page is read-only monitoring: CPU/mem/disk come from a deterministic host-metrics service (REST endpoint over the same FastAPI app), and model usage is a straight aggregation of the `ai_calls` audit table — no AI in the loop.
+
 ### 11.1 Proactive schedules & reports (later)
 
-Proactive **schedules** are **created on demand — when the user asks for one**, not pre-wired. A request like "send me a daily report on my interests at 8am" becomes a **feature** job (it needs repeatable code): it runs the normal flow (request → job → plan → expert sign-off), and the approved plan registers a **schedule** (`schedules` row). From then on a lightweight **scheduler** triggers a **report generator** built entirely from skills (e.g., `web.search` → `memory.write` → `report.generate` → `report.deliver`): it reads `user_interests`, produces a digest, stores it as an artifact + `reports` row, and **delivers it over chat** now (surfaced in the web **Reports** page later). The user can pause/edit/cancel the schedule by asking. Scheduled runs go through the same deterministic runtime, AI advisor, roles, and validation/audit as interactive requests — nothing bypasses the control path. *(The `schedules` table is the timer; each firing creates a normal request/job — distinct from the work-unit `jobs` table.)*
+Proactive **schedules** are **created on demand — when the user asks for one**, not pre-wired. A request like "send me a daily report on my interests at 8am" becomes a **feature** job (it needs repeatable code): it runs the normal flow (request → job → plan → expert sign-off), and the approved plan registers a **schedule** (`schedules` row). From then on a lightweight **scheduler** triggers a **report generator** built entirely from skills (e.g., `web.search` → `memory.write` → `report.generate` → `report.deliver`): it reads `user_interests`, produces a digest, stores it as an artifact + `reports` row, and **delivers it over chat** now (surfaced in the web **Reports & Data Products** page later). The user can pause/edit/cancel the schedule by asking. Scheduled runs go through the same deterministic runtime, AI advisor, roles, and validation/audit as interactive requests — nothing bypasses the control path. *(The `schedules` table is the timer; each firing creates a normal request/job — distinct from the work-unit `jobs` table.)*
+
+**Data products & code-driven refresh.** Recurring outputs — the **daily interest report**, **weather** for saved locations, **fishing tips**, **investment suggestions** for a watchlist, **real-time prices** for a predefined list — are modeled as **data products**: a `schedules` row (the timer + generator skills) plus the product's **predefined inputs** (watchlist / locations / topics) held in `schedules.params_json` (or `user_interests`), editable from chat or the web **Reports & Data Products** / **Settings** pages. Each run is a deterministic skill pipeline — `web.search` / `web.fetch` / `data.query` → validate → `report.generate` → store — writing the latest result (+ history) to `reports` + artifacts.
+
+- **Two refresh paths, same code.** Besides the **scheduled** cadence, every product exposes **Refresh now**: a code path that **re-invokes the same generator skills immediately** (an out-of-band run through the identical runtime + validation/audit), so the web page (or a chat command) can pull fresh data on demand without waiting for the next tick.
+- **Cadence by product.** Fast-moving products (**real-time prices**) can refresh on page load or a short polling interval; heavier ones (**daily report**, **investment suggestions**) refresh on schedule or explicit request. All cadences live in `schedules`/`policies.yaml` — deterministic, no model involved in *when* to run.
+- **Control path preserved.** A manual refresh is just another deterministic run: AI may *draft* content inside a step, but fetching, validation, provenance/citations, and storage are all code. Nothing a data product returns can trigger a side-effecting skill without the normal policy gate (§7.1).
 
 ---
 
@@ -1238,7 +1263,7 @@ Proactive **schedules** are **created on demand — when the user asks for one**
 - **Process (record)** — the recorded sequence of steps (skills, params, results, provenance) for a request.
 - **Catalog** — the machine-readable list of skills (name + description + params schema) the advisor may choose from.
 - **Gain** — the retrospective: what went well, what went badly, how to improve; converted to memory/skills.
-- **Library** — the local folder store (`Simple/`, `Active/`, `Archive/`) + `index.json`, mirrored in the DB; written only by the Librarian.
+- **Library** — the local folder store (`Active/` split by kind into `Simple/`, `Tasks/`, `Features/`; then `Archive/`) + `index.json`, mirrored in the DB; written only by the Librarian.
 - **Librarian** — the sole role permitted to write the archive folders and library/memory DB tables.
 - **Proactive job** — a scheduled, skill-built generator (e.g., daily interest report) that runs through the same deterministic runtime.
 - **User character** — a durable user trait (habit, liking, location, …) saved to `user_traits`.
