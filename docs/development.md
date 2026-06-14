@@ -2,8 +2,9 @@
 
 How to set up, develop, test, and run the deterministic AI assistant backend.
 
-> Companion docs: [design-spec.md](design-spec.md) (what we're building and why) and
-> [implementation-plan.md](implementation-plan.md) (the task-by-task build plan).
+> Companion docs: [design-spec.md](design-spec.md) (what we're building and why),
+> [implementation-plan.md](implementation-plan.md) (the task-by-task build plan), and
+> [db-schema.md](db-schema.md) (the storage-layer schema reference).
 
 ---
 
@@ -130,9 +131,14 @@ backend/
       redaction.py          # outbound secret-scrubbing guard
     cli/
       verify.py             # `python -m app.cli.verify` config/auth check
+      db.py                 # `python -m app.cli.db` migrate + inspect the schema
     config/
       settings.py           # env-backed Settings + models.yaml loader
       policies.py           # typed policy knobs loader
+    storage/
+      db.py                 # SQLite connect() (WAL, foreign keys, Row factory)
+      migrations/           # forward-only SQL migrations + runner (see db-schema.md)
+      repos/                # typed repositories (requests/jobs, memories)
   tests/                    # pytest suite (runs fully offline)
 config/
   models.yaml               # role -> provider/model mapping (swap models here, not in code)
@@ -144,7 +150,7 @@ scripts/
   _gen_lock.py              # helper: hash-pin a wheelhouse into requirements.lock
 vendor/
   wheels/                   # offline dependency cache (wheelhouse, git-ignored); see vendor/README.md
-docs/                       # design spec, implementation plan, this guide
+docs/                       # design spec, implementation plan, db schema, this guide
 .env.example                # copy to .env and fill in secrets (git-ignored)
 ```
 

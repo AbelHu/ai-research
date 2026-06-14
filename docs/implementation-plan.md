@@ -102,27 +102,27 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 > Goal: a deterministic SQLite layer that all later phases persist into. Pure code, no AI.
 
-- [ ] **T1.1 — DB connection + pragmas.** `app/storage/db.py`: open SQLite (WAL, foreign_keys ON), a `connect(path)` + in-memory mode for tests.
+- [x] **T1.1 — DB connection + pragmas.** `app/storage/db.py`: open SQLite (WAL, foreign_keys ON), a `connect(path)` + in-memory mode for tests.
   - *Validate:* `tests/test_db.py` opens an in-memory DB and reads `PRAGMA foreign_keys`.
-- [ ] **T1.2 — Migration runner.** Tiny forward-only migration mechanism (`app/storage/migrations/` + `migrate(conn)`); records applied versions in a `schema_migrations` table.
+- [x] **T1.2 — Migration runner.** Tiny forward-only migration mechanism (`app/storage/migrations/` + `migrate(conn)`); records applied versions in a `schema_migrations` table.
   - *Validate:* `tests/test_migrations.py` runs twice → idempotent.
-- [ ] **T1.3 — Identity tables.** Migration `0001`: `users`, `user_identities`, `user_traits`, `sessions`, `messages` (per §9).
+- [x] **T1.3 — Identity tables.** Migration `0001`: `users`, `user_identities`, `user_traits`, `sessions`, `messages` (per §9).
   - *Validate:* test creates schema + inserts/selects an owner user.
-- [ ] **T1.4 — Request/job tables.** Migration `0002`: `requests` (code `YYYYMMDDHHmmSS[-NN]`), `request_details`, `jobs`.
+- [x] **T1.4 — Request/job tables.** Migration `0002`: `requests` (code `YYYYMMDDHHmmSS[-NN]`), `request_details`, `jobs`.
   - *Validate:* test round-trips a request → job link.
-- [ ] **T1.5 — Plan tables.** Migration `0003`: `plans`, `phases`, `plan_tasks` (recursive `parent_task_id`), `steps`.
+- [x] **T1.5 — Plan tables.** Migration `0003`: `plans`, `phases`, `plan_tasks` (recursive `parent_task_id`), `steps`.
   - *Validate:* test inserts a plan→phase→task tree + a step.
-- [ ] **T1.6 — Role/audit tables.** Migration `0004`: `agents`, `role_messages` (envelope log), `ai_calls`, `audit_log`.
+- [x] **T1.6 — Role/audit tables.** Migration `0004`: `agents`, `role_messages` (envelope log), `ai_calls`, `audit_log`.
   - *Validate:* test inserts a `role_messages` row with `causation_id` chain.
-- [ ] **T1.7 — Memory tables.** Migration `0005`: `memories` (state active/archived/dropped + tombstone fields), `memory_tags`, `memory_archive`, `final_reports`, `library_index`, `embeddings`, `artifacts`.
+- [x] **T1.7 — Memory tables.** Migration `0005`: `memories` (state active/archived/dropped + tombstone fields), `memory_tags`, `memory_archive`, `final_reports`, `library_index`, `embeddings`, `artifacts`.
   - *Validate:* test inserts a memory + tag + final_report.
-- [ ] **T1.8 — Schedule/report tables.** Migration `0006`: `user_interests`, `schedules`, `reports`.
+- [x] **T1.8 — Schedule/report tables.** Migration `0006`: `user_interests`, `schedules`, `reports`.
   - *Validate:* test round-trips a schedule row.
-- [ ] **T1.9 — Repository: requests/jobs.** `app/storage/repos/requests.py` — typed create/get/list + `code` generator with the `-NN` same-second tiebreak (canonical id).
+- [x] **T1.9 — Repository: requests/jobs.** `app/storage/repos/requests.py` — typed create/get/list + `code` generator with the `-NN` same-second tiebreak (canonical id).
   - *Validate:* `tests/test_requests_repo.py` incl. two same-second requests get `…` and `…-01`.
-- [ ] **T1.10 — Repository: memories.** `app/storage/repos/memories.py` — create/get/search-stub/update-state, incl. the **drop = delete hot rows + keep thin tombstone** rule (§9.1).
+- [x] **T1.10 — Repository: memories.** `app/storage/repos/memories.py` — create/get/search-stub/update-state, incl. the **drop = delete hot rows + keep thin tombstone** rule (§9.1).
   - *Validate:* test drops a memory → tombstone row remains, `superseded_by` still followable.
-- [ ] **T1.11 — `db` CLI.** `app/cli/db.py` to create/inspect the schema (`--schema`, `--migrate`).
+- [x] **T1.11 — `db` CLI.** `app/cli/db.py` to create/inspect the schema (`--schema`, `--migrate`).
   - *Validate:* `python -m app.cli.db --migrate` then `--schema` prints tables.
 - ✅ **Checkpoint P1** — schema + repos round-trip; recovery story (folders+DB) viable.
 
