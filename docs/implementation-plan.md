@@ -156,21 +156,21 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 > Goal: every model call renders a versioned template, validates output into a schema, and audits the call. Tested with a **fake provider** (no network).
 
-- [ ] **T3.1 — Fake provider for tests.** `tests/fakes.py` — a deterministic `AIProvider` returning canned JSON.
+- [x] **T3.1 — Fake provider for tests.** `tests/fakes.py` — a deterministic `AIProvider` returning canned JSON.
   - *Validate:* `tests/test_fakes.py` sanity check.
-- [ ] **T3.2 — Template loader.** `app/advisor/templates.py` + `config/templates/` (`<role>.<action>.md` + `.schema.json`), version-pinned (§6D).
+- [x] **T3.2 — Template loader.** `app/advisor/templates.py` + `config/templates/` (`<role>.<action>.md` + `.schema.json`), version-pinned (§6D).
   - *Validate:* test renders a template with variables + loads its schema.
-- [ ] **T3.3 — Advisor wrapper core.** `app/advisor/wrapper.py` — render → call provider(role) → parse into pydantic → write `ai_calls` row. No repair yet.
+- [x] **T3.3 — Advisor wrapper core.** `app/advisor/wrapper.py` — render → call provider(role) → parse into pydantic → write `ai_calls` row. No repair yet.
   - *Validate:* `tests/test_wrapper.py` with the fake provider returns a validated object + an `ai_calls` row.
-- [ ] **T3.4 — Bounded repair/retry + fallback.** On schema failure: one repair attempt → deterministic fallback/escalate; record `validation_status`.
+- [x] **T3.4 — Bounded repair/retry + fallback.** On schema failure: one repair attempt → deterministic fallback/escalate; record `validation_status`.
   - *Validate:* test feeds malformed-then-valid JSON → repaired; always-malformed → fallback.
-- [ ] **T3.5 — Redaction on the wrapper path.** Assert outbound prompt content passes the redaction guard (already in provider, assert at wrapper boundary too).
+- [x] **T3.5 — Redaction on the wrapper path.** Assert outbound prompt content passes the redaction guard (already in provider, assert at wrapper boundary too).
   - *Validate:* test injects a fake secret → never present in the captured request.
-- [ ] **T3.6 — `Advisor.triage` (first typed method).** Returns `Triage{kind, clarity, complexity, confidence, rationale}` via template `triage.classify`.
+- [x] **T3.6 — `Advisor.triage` (first typed method).** Returns `Triage{kind, clarity, complexity, confidence, rationale}` via template `triage.classify`.
   - *Validate:* test: fake provider → valid `Triage`.
-- [ ] **T3.7 — `Advisor.analyze` (analyzer contract).** Template `analyzer.analyze` → validated `Analysis{belongs, kind, clarity, complexity, confidence, rationale, plan?, clarify?}` (§6D). *(Required by P4.4 — without it the first CLI ask can't satisfy the role contract.)*
+- [x] **T3.7 — `Advisor.analyze` (analyzer contract).** Template `analyzer.analyze` → validated `Analysis{belongs, kind, clarity, complexity, confidence, rationale, plan?, clarify?}` (§6D). *(Required by P4.4 — without it the first CLI ask can't satisfy the role contract.)*
   - *Validate:* test: fake provider → valid `Analysis`; malformed → repair then fallback.
-- [ ] **T3.8 — `Advisor.answer` (junior contract).** Template `junior.answer` → validated `AnswerDraft{answer, citations:[Source], confidence}` (§6D). *(Required by P4.5; the answer must carry ≥1 citation.)*
+- [x] **T3.8 — `Advisor.answer` (junior contract).** Template `junior.answer` → validated `AnswerDraft{answer, citations:[Source], confidence}` (§6D). *(Required by P4.5; the answer must carry ≥1 citation.)*
   - *Validate:* test: fake provider → valid `AnswerDraft`; a zero-citation answer is rejected.
 - ✅ **Checkpoint P3** — AI output is schema-validated + audited; the `triage` / `analyze` / `answer` contracts P4 needs all exist; provider swappable.
 

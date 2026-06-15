@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "title": "Triage",
+  "properties": {
+    "kind": { "type": "string", "enum": ["ask", "task", "feature"] },
+    "clarity": { "type": "string", "enum": ["clear", "unclear"] },
+    "complexity": { "type": "string", "enum": ["simple", "complex"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "rationale": { "type": "string" }
+  },
+  "required": ["kind", "clarity", "complexity", "confidence", "rationale"],
+  "additionalProperties": false
+}
