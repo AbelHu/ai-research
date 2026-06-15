@@ -110,6 +110,19 @@ def test_get_updates_passes_offset_and_returns_list() -> None:
     assert "timeout" in seen["payload"]
 
 
+def test_default_client_timeout_exceeds_poll_timeout() -> None:
+    # The default HTTP client must outlast the long-poll window, or an idle
+    # getUpdates aborts ~6s in (httpx's 5s default) and the bot exits — the bug
+    # that killed the service shortly after start.
+    adapter = TelegramAdapter("bot-token", poll_timeout=30)
+    client = adapter._client_factory()
+    try:
+        assert client.timeout.read is not None
+        assert client.timeout.read > 30
+    finally:
+        client.close()
+
+
 # --- verify (webhook secret) ------------------------------------------------
 
 

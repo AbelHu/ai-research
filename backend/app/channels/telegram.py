@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hmac
 from collections.abc import Callable
+from functools import partial
 
 import httpx
 
@@ -29,6 +30,10 @@ CHANNEL_NAME = "telegram"
 API_BASE = "https://api.telegram.org"
 # Long-poll seconds passed to getUpdates; the HTTP read timeout adds headroom.
 DEFAULT_POLL_TIMEOUT = 30
+# Seconds added on top of the long-poll window for the HTTP client timeout, so an
+# idle getUpdates (Telegram holds the connection up to ``poll_timeout`` seconds
+# when nothing is pending) isn't aborted by the client before it returns.
+POLL_TIMEOUT_HEADROOM = 15
 
 ClientFactory = Callable[[], httpx.Client]
 
@@ -46,12 +51,22 @@ class TelegramAdapter:
         self,
         token: str | Secret,
         *,
-        client_factory: ClientFactory = httpx.Client,
+        client_factory: ClientFactory | None = None,
         api_base: str = API_BASE,
         webhook_secret: str | Secret | None = None,
         poll_timeout: int = DEFAULT_POLL_TIMEOUT,
     ) -> None:
         self._token = token if isinstance(token, Secret) else Secret(token)
+        self._poll_timeout = poll_timeout
+        # The long-poll holds the HTTP connection open up to ``poll_timeout``
+        # seconds when no updates are pending; the client read timeout must
+        # exceed that or every idle getUpdates aborts (the bot then exits ~6s in,
+        # at httpx's 5s default). Default to poll_timeout + headroom; an injected
+        # factory (tests) is used as-is.
+        if client_factory is None:
+            client_factory = partial(
+                httpx.Client, timeout=float(poll_timeout + POLL_TIMEOUT_HEADROOM)
+            )
         self._client_factory = client_factory
         self._api_base = api_base.rstrip("/")
         self._webhook_secret = (
@@ -59,7 +74,6 @@ class TelegramAdapter:
             if webhook_secret is None or isinstance(webhook_secret, Secret)
             else Secret(webhook_secret)
         )
-        self._poll_timeout = poll_timeout
 
     # --- inbound ------------------------------------------------------------
 

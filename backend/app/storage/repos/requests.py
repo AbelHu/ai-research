@@ -196,6 +196,20 @@ def get_job_for_request(conn: sqlite3.Connection, request_id: int) -> Job | None
     return Job.from_row(row) if row else None
 
 
+def set_job_kind(conn: sqlite3.Connection, job_id: int, kind: str) -> Job:
+    """Re-classify a job's ``kind`` (e.g. promote ``ask`` → ``task``/``feature``).
+
+    Used when the Junior Worker can't answer a simple ask and the work is handed
+    back to the Analyzer for planning (§6A): the job is promoted to a complex
+    kind so it follows the plan → sign-off → runner path. Returns the updated row.
+    """
+    with conn:
+        conn.execute("UPDATE jobs SET kind = ? WHERE id = ?", (kind, job_id))
+    got = get_job(conn, job_id)
+    assert got is not None  # caller holds a live job id
+    return got
+
+
 def set_job_paused(conn: sqlite3.Connection, job_id: int, paused: bool) -> Job:
     """Set/clear a job's durable ``paused`` flag (design-spec §6B; plan T6.7).
 

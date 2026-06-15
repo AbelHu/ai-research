@@ -20,6 +20,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -39,6 +41,9 @@ from app.storage.migrations import migrate
 logger = logging.getLogger("app.channels.telegram")
 
 DEFAULT_DB_NAME = "app.db"
+# Back-off after a transient long-poll error before re-listening (a service must
+# keep running across timeouts / network blips, never exit on one).
+ERROR_BACKOFF_SECONDS = 3.0
 
 
 def serve(
@@ -47,11 +52,14 @@ def serve(
     advisor: Advisor,
     *,
     once: bool = False,
+    on_error_sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     """Long-poll Telegram, dispatching each update through the gateway.
 
     ``once`` drains the currently-pending updates and returns (handy for a
-    smoke test); otherwise it loops until interrupted (Ctrl-C).
+    smoke test); otherwise it loops **forever**, surviving transient errors, so
+    the service keeps listening until interrupted (Ctrl-C). ``on_error_sleep`` is
+    the back-off seam (injectable for tests).
     """
     policy = get_policies()
     rate_limiter = RefusalRateLimiter(
@@ -64,8 +72,14 @@ def serve(
         try:
             updates = adapter.get_updates(offset=offset)
         except TelegramError as exc:
-            logger.error("getUpdates failed: %s", exc)
-            return 1
+            # A long-poll timeout or transient network/Telegram error must NOT
+            # kill the service: log, back off, and keep listening. (--once is a
+            # smoke check, so there we surface the failure instead.)
+            logger.error("getUpdates failed (retrying): %s", exc)
+            if once:
+                return 1
+            on_error_sleep(ERROR_BACKOFF_SECONDS)
+            continue
         for update in updates:
             offset = int(update["update_id"]) + 1
             inbound = adapter.parse_inbound(update)
