@@ -159,3 +159,74 @@ def drop_memory(conn: sqlite3.Connection, memory_id: int) -> None:
             "WHERE id = ?",
             (memory_id,),
         )
+
+
+# Reinforcement window applied on read/use (implementation-plan T2.6). This is a
+# deliberately simple fixed slide; P5 (T5.4/T5.5) replaces it with the
+# importance-scaled, decay-aware formula from §9.1.
+REINFORCE_WINDOW = "+7 days"
+
+
+def touch_memory(
+    conn: sqlite3.Connection,
+    memory_id: int,
+    *,
+    revive: bool = False,
+) -> Memory | None:
+    """Reinforce a memory on read/use (§9.1; implementation-plan T2.6).
+
+    A deliberate read is proof the item is still useful, so it must refresh:
+    bump `use_count`, set `last_used_at = now`, and slide `expires_at` forward
+    past whatever it was scheduled to be (or `now` if it had already lapsed).
+    With ``revive=True`` an ``archived`` item is brought back to ``active`` —
+    the cold→hot path used by ``library.read``.
+
+    Returns the refreshed row, or ``None`` if the id is unknown.
+    """
+    if get_memory(conn, memory_id) is None:
+        return None
+    with conn:
+        conn.execute(
+            "UPDATE memories "
+            "SET use_count = use_count + 1, "
+            "    last_used_at = datetime('now'), "
+            "    expires_at = datetime("
+            "        CASE WHEN expires_at IS NULL OR expires_at < datetime('now') "
+            "             THEN datetime('now') ELSE expires_at END, ?), "
+            "    state = CASE WHEN ? AND state = 'archived' THEN 'active' ELSE state END, "
+            "    updated_at = datetime('now') "
+            "WHERE id = ?",
+            (REINFORCE_WINDOW, 1 if revive else 0, memory_id),
+        )
+    return get_memory(conn, memory_id)
+
+
+def normalize_tag(tag: str) -> str:
+    """Normalize a tag: trim, lowercase, collapse internal whitespace.
+
+    Raises ``ValueError`` for an empty/whitespace-only tag.
+    """
+    norm = " ".join(tag.strip().lower().split())
+    if not norm:
+        raise ValueError("tag must be non-empty")
+    return norm
+
+
+def add_tag(conn: sqlite3.Connection, memory_id: int, tag: str) -> str:
+    """Attach a normalized tag to a memory (idempotent). Returns the stored tag."""
+    norm = normalize_tag(tag)
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_tags (memory_id, tag) VALUES (?, ?)",
+            (memory_id, norm),
+        )
+    return norm
+
+
+def get_tags(conn: sqlite3.Connection, memory_id: int) -> list[str]:
+    """Return a memory's tags, sorted."""
+    rows = conn.execute(
+        "SELECT tag FROM memory_tags WHERE memory_id = ? ORDER BY tag",
+        (memory_id,),
+    ).fetchall()
+    return [r[0] for r in rows]

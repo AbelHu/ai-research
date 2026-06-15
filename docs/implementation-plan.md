@@ -132,21 +132,21 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 > Goal: the deterministic skill boundary — the only place "actions" run.
 
-- [ ] **T2.1 — `SkillSpec` + `@skill` registry.** `app/skills/registry.py` (name→spec, JSON-Schema from pydantic, duplicate guard, `catalog()`).
+- [x] **T2.1 — `SkillSpec` + `@skill` registry.** `app/skills/registry.py` (name→spec, JSON-Schema from pydantic, duplicate guard, `catalog()`).
   - *Validate:* `tests/test_registry.py` registers a dummy skill + reads its catalog entry.
-- [ ] **T2.2 — `SkillContext`.** `app/skills/context.py` — deterministic services only (db, config, user_id, logger); explicitly **no model**.
+- [x] **T2.2 — `SkillContext`.** `app/skills/context.py` — deterministic services only (db, config, user_id, logger); explicitly **no model**.
   - *Validate:* test constructs a context with a fake db.
-- [ ] **T2.3 — Policy gate (permission scope + effect class + confirmation rule).** `app/skills/policy.py` — each skill declares a **permission scope** + an **effect class** (`read` | `local_write` | `external`); confirmation is required **only** for `external` / user-visible effects, while `local_write` (`memory.write`, `memory.tag`, `profile.update`, reinforcement touches) is **permission-gated but not user-confirmed** (§9.1) — avoids over-prompting on local DB writes. *(Generalizes the spec's `side_effects: bool` into an effect class.)*
-  - *Validate:* `tests/test_policy.py` — `read` & `local_write` skip confirmation; `external` requires it; a missing permission is rejected.
-- [ ] **T2.4 — Runtime `execute()`.** `app/skills/runtime.py` — validate params → policy gate → run → record `steps` row (the §8.6 pipeline). Reject unknown skill.
+- [x] **T2.3 — Policy gate (permission scope + effect class + confirmation rule).** `app/skills/policy.py` — each skill declares a **permission scope** + an **effect class** (`read` | `local_write` | `external`); confirmation is required **only** for `external` / user-visible effects, while `local_write` (`memory.write`, `memory.tag`, `profile.update`, reinforcement touches) is **permission-gated but not user-confirmed** (§9.1) — avoids over-prompting on local DB writes. *(Generalizes the spec's `side_effects: bool` into an effect class.)*
+  - *Validate:* `tests/test_skill_policy.py` — `read` & `local_write` skip confirmation; `external` requires it; a missing permission is rejected.
+- [x] **T2.4 — Runtime `execute()`.** `app/skills/runtime.py` — validate params → policy gate → run → record `steps` row (the §8.6 pipeline). Reject unknown skill.
   - *Validate:* `tests/test_runtime.py` — happy path records a step; bad params rejected; unknown skill raises.
-- [ ] **T2.5 — First read-only skill: `memory.search`.** Wire to the P1 memories repo (stub ranking for now).
+- [x] **T2.5 — First read-only skill: `memory.search`.** Wire to the P1 memories repo (stub ranking for now).
   - *Validate:* test runs it through `execute()` and gets hits.
-- [ ] **T2.6 — `memory.get` + `library.read` (reinforcement).** Read skills that refresh TTL/weight (§9.1) — the touch is emitted, applied immediately.
+- [x] **T2.6 — `memory.get` + `library.read` (reinforcement).** Read skills that refresh TTL/weight (§9.1) — the touch is emitted, applied immediately.
   - *Validate:* test asserts `last_used_at`/`use_count`/`expires_at` advance on read.
-- [ ] **T2.7 — `memory.write` + `memory.tag`.** Local DB writes (no network).
+- [x] **T2.7 — `memory.write` + `memory.tag`.** Local DB writes (no network).
   - *Validate:* test writes + tags a memory, normalized tag stored.
-- [ ] **T2.8 — Skill auto-discovery.** `app/skills/__init__.py` imports submodules so `@skill` runs at import.
+- [x] **T2.8 — Skill auto-discovery.** `app/skills/__init__.py` imports submodules so `@skill` runs at import.
   - *Validate:* test asserts the catalog contains the registered skills after `import app.skills`.
 - ✅ **Checkpoint P2** — catalog + runtime enforce validate→gate→run→record.
 

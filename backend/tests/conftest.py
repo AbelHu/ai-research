@@ -32,3 +32,21 @@ def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
     monkeypatch.setattr(socket.socket, "connect", _blocked)
+
+
+@pytest.fixture
+def skill_registry():
+    """Snapshot/restore the process-wide skill REGISTRY.
+
+    Tests that register throwaway skills request this so their dummies don't
+    leak into (or collide within) the real catalog. The real skills registered
+    at import are preserved across the snapshot/restore.
+    """
+    from app.skills.registry import REGISTRY
+
+    saved = dict(REGISTRY)
+    try:
+        yield REGISTRY
+    finally:
+        REGISTRY.clear()
+        REGISTRY.update(saved)
