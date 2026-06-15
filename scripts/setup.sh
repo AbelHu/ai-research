@@ -25,8 +25,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # 1) Environment: virtualenv + pinned dependencies (no network if a wheelhouse).
+# Invoke via `bash` so it works even if the script's executable bit was lost on
+# checkout (e.g. a Windows/`core.filemode=false` clone).
 # shellcheck disable=SC2086 # intentional word-splitting of the optional args
-./scripts/setup-env.sh ${AIR_SETUP_ENV_ARGS:-}
+bash "$REPO_ROOT/scripts/setup-env.sh" ${AIR_SETUP_ENV_ARGS:-}
 
 # 2) Configuration wizard + verification (forward any args, e.g. --check).
 VENV_PY="${AIR_VENV_DIR:-$REPO_ROOT/.venv}/bin/python"
