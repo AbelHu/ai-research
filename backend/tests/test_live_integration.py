@@ -120,7 +120,9 @@ def test_live_completion_smoke(resolver) -> None:
             max_tokens=5,
         )
     )
-    assert resp.text.strip() != ""
+    # Meaningful: the model actually *followed the instruction* — not merely that
+    # it returned something non-empty.
+    assert "pong" in resp.text.strip().lower()
     assert resp.model  # the provider reports a model id
 
 
@@ -133,9 +135,13 @@ def test_live_triage_validates(conn, resolver) -> None:
 
     result = advisor.triage("what is 2+2?", request_id=req.id)
 
-    assert result.kind in ("ask", "task", "feature")
-    # The real model's output passed our strict template-requirement gate
-    # (not a fallback) — the meaningful, model-agnostic invariant.
+    # "what is 2+2?" is a maximally-clear factual question: a competent model must
+    # classify it as a clear, simple ask. We assert the *actual classification*,
+    # not merely that the output fits the enum — a wrong (or fallback)
+    # classification fails here, which is what makes this a real test. (The
+    # fallback would read ask/unclear/complex, so this also pins it to a genuine
+    # model reply.)
+    assert (result.kind, result.clarity, result.complexity) == ("ask", "clear", "simple")
     row = ai_calls_repo.list_ai_calls(conn, req.id)[0]
     assert row["validation_status"] in ("valid", "repaired")
 
@@ -145,13 +151,22 @@ def test_live_analyze_validates(conn, resolver) -> None:
     advisor = _advisor(conn, resolver)
 
     analysis = advisor.analyze(
-        text="Compare three cloud vendors and recommend one.", request_id=req.id
+        text=(
+            "Compare AWS, Azure and GCP for hosting a new web app, weigh the "
+            "trade-offs, and recommend one with justification."
+        ),
+        request_id=req.id,
     )
 
-    assert isinstance(analysis.belongs, bool)
-    assert analysis.kind in ("ask", "task", "feature")
     row = ai_calls_repo.list_ai_calls(conn, req.id)[0]
     assert row["validation_status"] in ("valid", "repaired")
+    # Multi-step research + weigh trade-offs + recommend = complex work, not a
+    # one-shot factual ask. That's the semantic signal that should route the
+    # platform onto the plan path, so it's the meaningful thing to assert (and it
+    # came from a genuine reply, per the validation-status check above).
+    assert analysis.complexity == "complex"
+    assert isinstance(analysis.belongs, bool)
+    assert analysis.kind in ("ask", "task", "feature")
 
 
 def test_live_answer_cites_a_source(conn, resolver) -> None:
@@ -164,8 +179,46 @@ def test_live_answer_cites_a_source(conn, resolver) -> None:
         request_id=req.id,
     )
 
-    assert draft.answer.strip() != ""
-    assert len(draft.citations) >= 1  # schema requires ≥1 citation
+    # Meaningful: the answer is actually *correct* and *grounded in the source we
+    # handed the model* — it cites our memory ref `m1`, not an invented one.
+    assert "paris" in draft.answer.lower()
+    assert any(c.ref == "m1" for c in draft.citations), draft.citations
+
+
+def test_live_answer_grounds_in_provided_context(conn, resolver) -> None:
+    """The core anti-hallucination guarantee: the model answers from *our* context,
+    not its training — and **selects the right item** rather than echoing.
+
+    We feed several made-up facts the model cannot know (release codenames) and
+    ask about one of them. To pass, the model must (a) return the codename only
+    the provided context contains, (b) *not* leak the distractor codenames, and
+    (c) cite the **specific** source ref it used (``m2``), ignoring the others.
+    A model that merely parrots the request, or answers from training, cannot do
+    this — which is what makes it a meaningful grounding test.
+    """
+    req = requests_repo.create_request(conn, title="release codename")
+    advisor = _advisor(conn, resolver)
+
+    draft = advisor.answer(
+        text="What is the internal codename for the Q3 release? Use the provided context.",
+        hits=[
+            {"ref": "m1", "content": "The Q2 release is codenamed 'Brass Otter'."},
+            {"ref": "m2", "content": "The Q3 release is codenamed 'Marmalade Falcon'."},
+            {"ref": "m4", "content": "The Q4 release is codenamed 'Velvet Heron'."},
+        ],
+        request_id=req.id,
+    )
+
+    answer = draft.answer.lower()
+    # Picked the correct fact for *Q3*...
+    assert "marmalade falcon" in answer
+    # ...and didn't leak the distractor codenames (Q2 / Q4).
+    assert "brass otter" not in answer
+    assert "velvet heron" not in answer
+    # ...and cited the specific source it used, not the distractors.
+    cited = {c.ref for c in draft.citations}
+    assert "m2" in cited, draft.citations
+    assert not (cited & {"m1", "m4"}), draft.citations
 
 
 # --- the headline: a simple ask, end-to-end, through the real model ---------
@@ -178,8 +231,11 @@ def test_live_end_to_end_ask(conn, resolver) -> None:
 
     outcome = run_ask(conn, advisor, "What is the capital of France?", user_id=user_id)
 
-    # A maximally-clear ask should be answered end-to-end (not clarified/planned).
+    # A maximally-clear ask, answered end-to-end (not clarified/planned), with the
+    # *correct* answer surfaced to the user and grounded in the seeded memory.
     assert outcome.status == "answered", f"unexpected outcome: {outcome.status}"
     assert outcome.answer is not None
-    assert len(outcome.answer.citations) >= 1
-    assert outcome.delivery and f"/req {outcome.request.code}" in outcome.delivery
+    assert "paris" in outcome.answer.answer.lower()
+    assert any(c.ref == "m1" for c in outcome.answer.citations), outcome.answer.citations
+    assert outcome.delivery and "paris" in outcome.delivery.lower()
+    assert f"/req {outcome.request.code}" in outcome.delivery

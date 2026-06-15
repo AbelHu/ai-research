@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.advisor.schemas import Source
 from app.roles.envelope import Action, Role
 from app.roles.pm import format_delivery, route_inbound
 from app.storage.db import connect
@@ -77,3 +78,33 @@ def test_format_delivery_tags_request(conn) -> None:
     assert f"/req {result.request.code}" in msg
     assert "hello there" in msg  # title
     assert "Hi!" in msg
+    assert "Sources:" not in msg  # no sources → no Sources block
+
+
+def test_format_delivery_shows_source_urls(conn) -> None:
+    result = route_inbound(conn, "explain go memory management")
+    sources = [
+        Source(
+            ref="https://go.dev/doc/gc-guide",
+            url="https://go.dev/doc/gc-guide",
+            title="Go GC Guide",
+        ),
+        Source(ref="https://go.dev/ref/mem", url="https://go.dev/ref/mem"),
+    ]
+    msg = format_delivery(result.request, "Go uses a garbage collector.", sources=sources)
+
+    # The answer and a Sources block with the actual URLs are surfaced to the user.
+    assert "Go uses a garbage collector." in msg
+    assert "Sources:" in msg
+    assert "Go GC Guide — https://go.dev/doc/gc-guide" in msg
+    assert "  - https://go.dev/ref/mem" in msg
+
+
+def test_format_delivery_renders_memory_ref_without_url(conn) -> None:
+    result = route_inbound(conn, "capital of France")
+    sources = [Source(ref="m1", title="Geography note")]
+    msg = format_delivery(result.request, "Paris.", sources=sources)
+
+    # A non-URL (memory) citation falls back to its opaque ref.
+    assert "Sources:" in msg
+    assert "Geography note (m1)" in msg

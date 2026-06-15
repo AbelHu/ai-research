@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
+from app.advisor.schemas import Source
 from app.roles.envelope import Action, Role, RoleMessage
 from app.storage.repos import requests as requests_repo
 from app.storage.repos.requests import Request
@@ -122,7 +123,39 @@ def route_inbound(
     )
 
 
-def format_delivery(request: Request, answer_text: str) -> str:
-    """Render the user-facing delivery, tagged with `/req <id>` + title (§6C)."""
+def format_delivery(
+    request: Request, answer_text: str, *, sources: list[Source] | None = None
+) -> str:
+    """Render the user-facing delivery, tagged with `/req <id>` + title (§6C).
+
+    When the answer carries sources, list them beneath it so the user actually
+    sees the provenance — the memory ref or source URL — backing the answer
+    (§7.1). An answer with no sources is delivered as the bare answer text.
+    """
     title = request.title or "untitled request"
-    return f"/req {request.code} «{title}»\n\n{answer_text}"
+    body = f"/req {request.code} «{title}»\n\n{answer_text}"
+    source_lines = _format_sources(sources or [])
+    if source_lines:
+        body += "\n\n" + "\n".join(source_lines)
+    return body
+
+
+def _format_sources(sources: list[Source]) -> list[str]:
+    """Render citations as a human-readable `Sources:` block (one bullet each).
+
+    Prefers a titled link (`title — url`), falls back to a bare URL, and finally
+    to the opaque `ref` for a non-URL source (e.g. a memory citation).
+    """
+    if not sources:
+        return []
+    lines = ["Sources:"]
+    for source in sources:
+        if source.url and source.title:
+            lines.append(f"  - {source.title} — {source.url}")
+        elif source.url:
+            lines.append(f"  - {source.url}")
+        elif source.title:
+            lines.append(f"  - {source.title} ({source.ref})")
+        else:
+            lines.append(f"  - {source.ref}")
+    return lines

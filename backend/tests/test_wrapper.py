@@ -6,6 +6,7 @@ All offline: the advisor talks to a `FakeProvider`, never the network.
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -114,6 +115,27 @@ def test_triage_returns_validated_object_and_audits(db) -> None:
 
 
 # --- T3.4 repair + fallback -------------------------------------------------
+
+
+def test_prompt_and_response_are_logged(db, caplog) -> None:
+    conn, request_id = db
+    provider = FakeProvider(VALID_TRIAGE)
+    advisor = _advisor(conn, provider)
+
+    with caplog.at_level(logging.DEBUG, logger="app.advisor"):
+        advisor.triage("what is 2+2?", request_id=request_id)
+
+    messages = [r.getMessage() for r in caplog.records]
+    # The exact prompt we sent the model is logged at DEBUG (the "request"),
+    # including the rendered user text — so a run is fully reconstructable from
+    # the logs even though the DB only keeps a sha256 ref of the prompt.
+    request_logs = [m for m in messages if m.startswith("advisor request:")]
+    assert request_logs, messages
+    assert "what is 2+2?" in request_logs[0]
+    # The model's reply is logged too (the "response").
+    response_logs = [m for m in messages if m.startswith("advisor response:")]
+    assert response_logs, messages
+    assert '"kind"' in response_logs[0]
 
 
 def test_malformed_then_valid_is_repaired(db) -> None:

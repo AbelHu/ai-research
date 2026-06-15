@@ -205,7 +205,9 @@ def _run_answer_path(
         )
         return AskOutcome(status="unanswered", request=request, job_id=job_id, delivery=delivery)
 
-    delivery = pm.format_delivery(request, junior_result.answer.answer)
+    delivery = pm.format_delivery(
+        request, junior_result.answer.answer, sources=junior_result.answer.citations
+    )
     _emit_boss(
         conn,
         deliver_decision,

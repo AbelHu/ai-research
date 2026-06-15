@@ -391,6 +391,18 @@ class Advisor:
             request_id,
             job_id,
         )
+        # The exact prompt we send the model (already redacted), at DEBUG so it
+        # always lands in the run-log file and streams to the console in --debug
+        # mode. This is the "request sent to the model"; pair it with the matching
+        # "advisor response" line below to read the full exchange. (The DB only
+        # keeps a sha256 ref of the prompt, never its raw text — §12.)
+        logger.debug(
+            "advisor request: role=%s template=%s request_id=%s prompt=%s",
+            role,
+            template.id,
+            request_id,
+            prompt,
+        )
 
         started = time.monotonic()
         value, status, last_response, tokens = self._call_with_repair(

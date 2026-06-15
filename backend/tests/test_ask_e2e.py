@@ -91,6 +91,9 @@ def test_simple_ask_answered_end_to_end(conn) -> None:
     assert outcome.answer.answer.startswith("Paris")
     assert outcome.answer.citations[0].ref == "memory:1"
     assert f"/req {outcome.request.code}" in outcome.delivery
+    # The source is surfaced to the user in the delivery (provenance, §7.1).
+    assert "Sources:" in outcome.delivery
+    assert "memory:1" in outcome.delivery
 
 
 def test_full_trace_is_persisted(conn) -> None:
