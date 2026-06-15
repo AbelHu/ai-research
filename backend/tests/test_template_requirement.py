@@ -22,6 +22,7 @@ CASES = [
     ("expert.review", schemas.Verdict),
     ("worker.next_action", schemas.ProposedAction),
     ("junior.answer", schemas.AnswerDraft),
+    ("coder.generate", schemas.GeneratedSkill),
 ]
 
 

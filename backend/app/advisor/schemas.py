@@ -150,3 +150,19 @@ class ProposedAction(_Strict):
     params: dict = Field(default_factory=dict)
     rationale: str = ""
     done: bool = False
+
+
+class GeneratedSkill(_Strict):
+    """A feature job's generated reusable skill (template `coder.generate`, §5/§6B).
+
+    The model proposes the **code** for a new ``@skill``; deterministic code
+    writes it **inert** (never executed) under ``app/skills/generated/<job>/``
+    and gates activation on user confirmation (`confirm_generated_code`). The
+    ``skill_name`` must be ``generated.*`` so a generated skill can never shadow a
+    built-in; ``module_filename`` is a bare ``*.py`` name (no path separators).
+    """
+
+    skill_name: str = Field(..., pattern=r"^generated\.[a-z0-9_]+$")
+    module_filename: str = Field(..., pattern=r"^[a-z0-9_]+\.py$")
+    code: str = Field(..., min_length=1)
+    rationale: str = ""

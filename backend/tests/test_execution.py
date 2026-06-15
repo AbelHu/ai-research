@@ -140,3 +140,51 @@ def test_execute_reconstructs_card_when_omitted(conn) -> None:
 
     assert outcome.status == "completed"
     assert outcome.plan_id is not None
+
+
+def test_feature_job_generates_inert_skill(conn, tmp_path, monkeypatch) -> None:
+    # A feature job runs its plan AND produces a reusable skill, written inert.
+    from app.skills import codegen
+
+    monkeypatch.setattr(codegen, "GENERATED_ROOT", tmp_path)
+    ensure_owner(conn)
+    req, job, card = _planned_job(conn, kind="feature")
+    generated = json.dumps(
+        {
+            "skill_name": "generated.thing",
+            "module_filename": "thing.py",
+            "code": "x = 1\n",
+            "rationale": "reusable",
+        }
+    )
+    # plan → approve → task → approve(phase) → THEN coder.generate_skill.
+    advisor = _advisor(conn, [_plan_json("Build"), APPROVE, SEARCH, APPROVE, generated])
+
+    outcome = execute_planned_job(conn, advisor, job_id=job.id, card=card)
+
+    assert outcome.status == "completed"
+    assert outcome.generated_skill is not None
+    assert outcome.generated_skill.skill_name == "generated.thing"
+    # The delivery tells the user a skill was built but is inactive pending review.
+    assert "generated.thing" in outcome.delivery
+    assert "confirm" in outcome.delivery.lower()
+    # The code is on disk inert (not registered).
+    assert codegen.is_inert(tmp_path, req.code)
+
+
+def test_feature_job_completes_even_if_codegen_fails(conn, tmp_path, monkeypatch) -> None:
+    # Codegen is a non-fatal deliverable: an unparseable skill → job still done.
+    from app.skills import codegen
+
+    monkeypatch.setattr(codegen, "GENERATED_ROOT", tmp_path)
+    ensure_owner(conn)
+    req, job, card = _planned_job(conn, kind="feature")
+    advisor = _advisor(
+        conn, [_plan_json("Build"), APPROVE, SEARCH, APPROVE, "(not valid json)", "(still bad)"]
+    )
+
+    outcome = execute_planned_job(conn, advisor, job_id=job.id, card=card)
+
+    assert outcome.status == "completed"  # job still completes + reports
+    assert outcome.generated_skill is None  # no code offered
+    assert codegen.get_bundle(tmp_path, req.code) is None

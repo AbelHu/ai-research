@@ -39,7 +39,15 @@ from pydantic import BaseModel, ValidationError
 from app.advisor.citations import UrlVerifier, http_url_exists, unresolved_citation_urls
 from app.advisor.providers import AIProvider, CompletionRequest, CompletionResponse
 from app.advisor.redaction import redact_text
-from app.advisor.schemas import Analysis, AnswerDraft, PlanSpec, ProposedAction, Triage, Verdict
+from app.advisor.schemas import (
+    Analysis,
+    AnswerDraft,
+    GeneratedSkill,
+    PlanSpec,
+    ProposedAction,
+    Triage,
+    Verdict,
+)
 from app.advisor.templates import Template, load_template
 from app.config.policies import get_policies
 from app.storage.repos import ai_calls as ai_calls_repo
@@ -262,6 +270,29 @@ class Advisor:
             template_name="worker.next_action",
             variables={"goal": goal, "catalog": catalog, "progress": progress},
             schema=ProposedAction,
+            request_id=request_id,
+            job_id=job_id,
+            fallback=None,
+        )
+
+    def generate_skill(
+        self,
+        *,
+        goal: str,
+        request_id: int,
+        job_id: int | None = None,
+    ) -> GeneratedSkill:
+        """Generate a feature job's reusable skill code (template ``coder.generate``).
+
+        No deterministic fallback: an unvalidatable proposal **escalates** rather
+        than writing code that doesn't match the contract. The returned code is
+        written **inert** and gated on confirmation before activation (§5/§6B).
+        """
+        return self._run(
+            role="planner",
+            template_name="coder.generate",
+            variables={"goal": goal},
+            schema=GeneratedSkill,
             request_id=request_id,
             job_id=job_id,
             fallback=None,

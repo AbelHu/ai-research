@@ -20,15 +20,18 @@ service delivers the returned message back to the user as a progress update.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from app.advisor.wrapper import Advisor
 from app.memory.reports import FinalReport
-from app.roles import analyzer, company_expert, plan_expert, pm, senior
+from app.roles import analyzer, coder, company_expert, plan_expert, pm, senior
 from app.roles.envelope import Role
 from app.storage.repos import plans as plans_repo
 from app.storage.repos import requests as requests_repo
 from app.storage.repos.requests import Request
+
+logger = logging.getLogger("app.roles.execution")
 
 # Terminal status of a job execution (what the PM would surface to the user).
 JobStatus = str  # "completed" | "plan_declined" | "phase_escalated"
@@ -44,6 +47,7 @@ class JobOutcome:
     plan_id: int | None = None
     report: FinalReport | None = None
     delivery: str | None = None  # PM-formatted user message
+    generated_skill: coder.CoderResult | None = None  # feature jobs only
 
 
 def card_for_job(conn, job_id: int) -> dict:
@@ -171,11 +175,25 @@ def execute_planned_job(
     # 5) Company Expert: plan InProgress → Resolved (all phases signed off).
     plans_repo.set_plan_status(conn, plan.id, "Resolved", actor=Role.company_expert)
 
-    # 6) Plan Expert assembles the §9.2 final report.
+    # 6) Feature jobs produce reusable code: the Coder generates the skill and it
+    # is written **inert** (never executed) — activation is gated on user
+    # confirmation (`confirm_generated_code`, §5/§6B). A generation failure is
+    # non-fatal: the job still completes + reports (the code just isn't offered).
+    generated = None
+    if requests_repo.get_job(conn, job_id).kind == "feature":
+        generated = _try_generate_skill(conn, advisor, job_id=job_id, goal=card["text"])
+
+    # 7) Plan Expert assembles the §9.2 final report.
     report = plan_expert.assemble_final_report(conn, plan)
 
-    # 7) PM delivers the result to the user.
-    delivery = pm.format_delivery(request, report.brief_description)
+    # 8) PM delivers the result to the user (noting any code awaiting confirmation).
+    message = report.brief_description
+    if generated is not None:
+        message += (
+            f"\n\nI also built a reusable skill `{generated.skill_name}` for this. "
+            "It's saved but inactive pending your review — confirm to activate it."
+        )
+    delivery = pm.format_delivery(request, message)
     return JobOutcome(
         status="completed",
         job_id=job_id,
@@ -183,4 +201,21 @@ def execute_planned_job(
         plan_id=plan.id,
         report=report,
         delivery=delivery,
+        generated_skill=generated,
     )
+
+
+def _try_generate_skill(conn, advisor: Advisor, *, job_id: int, goal: str):
+    """Generate a feature job's skill (inert), swallowing failures as non-fatal.
+
+    Codegen is a best-effort deliverable: if the model can't produce a valid
+    skill, the job still completes and reports — we just don't offer code. We
+    only ever write **inert** code here; the ``confirm_generated_code`` gate is
+    honored downstream at activation (`codegen.confirm_and_activate`), so a
+    generated skill never runs until the user confirms it (§5/§6B).
+    """
+    try:
+        return coder.generate_feature_skill(conn, advisor, job_id=job_id, goal=goal)
+    except Exception as exc:  # noqa: BLE001 - codegen is a non-fatal deliverable
+        logger.warning("feature skill generation failed for job %s: %s", job_id, exc)
+        return None

@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "title": "GeneratedSkill",
+  "properties": {
+    "skill_name": { "type": "string", "pattern": "^generated\\.[a-z0-9_]+$" },
+    "module_filename": { "type": "string", "pattern": "^[a-z0-9_]+\\.py$" },
+    "code": { "type": "string", "minLength": 1 },
+    "rationale": { "type": "string" }
+  },
+  "required": ["skill_name", "module_filename", "code"],
+  "additionalProperties": false
+}
