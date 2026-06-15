@@ -184,13 +184,17 @@ class Advisor:
         *,
         text: str,
         title: str = "",
-        request_code: str = "",
         append: bool = False,
         request_id: int,
         job_id: int | None = None,
     ) -> Analysis:
-        """Authoritative validation + classification (template ``analyzer.analyze``)."""
-        card = _format_card(text=text, title=title, request_code=request_code, append=append)
+        """Authoritative validation + classification (template ``analyzer.analyze``).
+
+        Internal identifiers (request id/code, job id) are **never** rendered into
+        the prompt — the model classifies on the user's content only. The ids are
+        used solely for the deterministic envelope + the `ai_calls` audit row.
+        """
+        card = _format_card(text=text, title=title, append=append)
         return self._run(
             role="planner",
             template_name="analyzer.analyze",
@@ -416,11 +420,14 @@ class Advisor:
         return None, "invalid", resp2.text, _tokens(resp2)
 
 
-def _format_card(*, text: str, title: str, request_code: str, append: bool) -> str:
-    """Render a minimal RequestCard block for the analyzer prompt (§6D)."""
+def _format_card(*, text: str, title: str, append: bool) -> str:
+    """Render a minimal RequestCard block for the analyzer prompt (§6D).
+
+    Deliberately **omits internal identifiers** (request id/code, job id): the
+    model never needs them to classify, and they must not leave the machine in a
+    prompt. Only the user-authored title/text + the append flag are rendered.
+    """
     lines = ["Request card:"]
-    if request_code:
-        lines.append(f"- code: {request_code}")
     if title:
         lines.append(f"- title: {title}")
     lines.append(f"- appended detail: {'yes' if append else 'no'}")

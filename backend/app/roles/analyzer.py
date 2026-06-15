@@ -68,7 +68,6 @@ def analyze(
     analysis = advisor.analyze(
         text=card["text"],
         title=card.get("title") or "",
-        request_code=card.get("request_code") or "",
         append=append,
         request_id=request_id,
     )

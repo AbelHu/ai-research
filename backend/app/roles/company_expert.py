@@ -45,7 +45,7 @@ def review_plan(
 ) -> PlanReview:
     """Approve or decline a drafted plan; on approve, cascade to Approved (§6B)."""
     verdict = advisor.review(
-        subject=f"plan #{plan.id}",
+        subject="the proposed plan",
         context=context,
         request_id=request_id,
         job_id=plan.job_id,
@@ -77,7 +77,7 @@ def review_phase(
         max_phase_declines if max_phase_declines is not None else get_policies().max_phase_declines
     )
     verdict = advisor.review(
-        subject=f"phase #{phase.id} ({phase.title})",
+        subject=phase.title or "the completed phase",
         context=context,
         request_id=request_id,
         job_id=job_id,

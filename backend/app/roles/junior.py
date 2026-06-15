@@ -25,6 +25,28 @@ from app.skills.context import SkillContext
 # The Junior reads memory; it never writes (local_write/external need a gate).
 _JUNIOR_PERMISSIONS = frozenset({"memory.read"})
 
+# Fields of a memory hit safe to show the model. Internal identifiers (the DB
+# `id`) and lifecycle bookkeeping (`state`, `use_count`, TTL fields) are kept out
+# of the prompt; the model only needs the content + an opaque citation ref.
+_HIT_FIELDS_FOR_MODEL = ("content", "summary", "tags")
+
+
+def _hits_for_model(hits: list) -> list[dict]:
+    """Render search hits for the prompt with an **opaque** citation ref.
+
+    The model never sees a memory's DB id — each hit gets a per-call token
+    (``m1``, ``m2``, …) it can cite instead. Deterministic code keeps the real
+    id; only the content + opaque ref leave the machine (privacy: no internal
+    ids in prompts).
+    """
+    rendered: list[dict] = []
+    for index, hit in enumerate(hits, start=1):
+        data = hit.model_dump()
+        item = {"ref": f"m{index}"}
+        item.update({k: data[k] for k in _HIT_FIELDS_FOR_MODEL if data.get(k) is not None})
+        rendered.append(item)
+    return rendered
+
 
 @dataclass(frozen=True)
 class JuniorResult:
@@ -49,7 +71,7 @@ def answer_ask(
         job_id=job_id,
     )
     search = runtime.execute("memory.search", {"query": card["text"], "limit": search_limit}, ctx)
-    hits = [hit.model_dump() for hit in search.value.hits]
+    hits = _hits_for_model(search.value.hits)
 
     draft = advisor.answer(
         text=card["text"],
