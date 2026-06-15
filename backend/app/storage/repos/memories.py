@@ -161,25 +161,69 @@ def drop_memory(conn: sqlite3.Connection, memory_id: int) -> None:
         )
 
 
-# Reinforcement window applied on read/use (implementation-plan T2.6). This is a
-# deliberately simple fixed slide; P5 (T5.4/T5.5) replaces it with the
-# importance-scaled, decay-aware formula from §9.1.
-REINFORCE_WINDOW = "+7 days"
+def archive_memory(conn: sqlite3.Connection, memory_id: int) -> None:
+    """Archive a memory: keep the row + content, drop its hot vector index row.
+
+    Archiving is non-destructive (the content stays for deep-search revival),
+    but the item leaves the hot **vector** index. It also leaves keyword results
+    because `keyword_search` filters on ``state = 'active'`` (§9.1).
+    """
+    with conn:
+        conn.execute(
+            "DELETE FROM embeddings WHERE object_type = ? AND object_id = ?",
+            (MEMORY_OBJECT_TYPE, memory_id),
+        )
+        conn.execute(
+            "UPDATE memories SET state = 'archived', updated_at = datetime('now') WHERE id = ?",
+            (memory_id,),
+        )
 
 
-def touch_memory(
+def set_retention_class(conn: sqlite3.Connection, memory_id: int, retention_class: str) -> None:
+    """Update a memory's retention class (the sweep's promote step, §9.1)."""
+    with conn:
+        conn.execute(
+            "UPDATE memories SET retention_class = ?, updated_at = datetime('now') WHERE id = ?",
+            (retention_class, memory_id),
+        )
+
+
+def mark_superseded(conn: sqlite3.Connection, memory_id: int, superseded_by: int) -> None:
+    """Point a memory at the row that supersedes it (consolidation/version chain)."""
+    with conn:
+        conn.execute(
+            "UPDATE memories SET superseded_by = ?, updated_at = datetime('now') WHERE id = ?",
+            (superseded_by, memory_id),
+        )
+
+
+def list_active(conn: sqlite3.Connection) -> list[Memory]:
+    """Return all active memories ordered by id (the sweep's working set)."""
+    rows = conn.execute("SELECT * FROM memories WHERE state = 'active' ORDER BY id").fetchall()
+    return [Memory.from_row(r) for r in rows]
+
+
+# Reinforcement is computed by the policy-aware `app.memory.reinforce` layer
+# (design-spec §9.1; implementation-plan T5.5) and written via
+# `apply_reinforcement` below — the storage layer holds no weight/policy math.
+
+
+def apply_reinforcement(
     conn: sqlite3.Connection,
     memory_id: int,
     *,
+    last_used_at: str,
+    expires_at: str | None,
+    importance: float | None,
     revive: bool = False,
 ) -> Memory | None:
-    """Reinforce a memory on read/use (§9.1; implementation-plan T2.6).
+    """Low-level reinforcement setter (design-spec §9.1; implementation-plan T5.5).
 
-    A deliberate read is proof the item is still useful, so it must refresh:
-    bump `use_count`, set `last_used_at = now`, and slide `expires_at` forward
-    past whatever it was scheduled to be (or `now` if it had already lapsed).
-    With ``revive=True`` an ``archived`` item is brought back to ``active`` —
-    the cold→hot path used by ``library.read``.
+    Applies a precomputed reinforcement touch: bump `use_count`, stamp
+    `last_used_at`, slide `expires_at`, nudge `importance`, and (when ``revive``)
+    bring an ``archived`` item back to ``active``. The *values* are computed by
+    the policy-aware `app.memory.reinforce` layer; this repo function only
+    writes them, so the storage layer stays free of the weight/policy math.
 
     Returns the refreshed row, or ``None`` if the id is unknown.
     """
@@ -189,14 +233,13 @@ def touch_memory(
         conn.execute(
             "UPDATE memories "
             "SET use_count = use_count + 1, "
-            "    last_used_at = datetime('now'), "
-            "    expires_at = datetime("
-            "        CASE WHEN expires_at IS NULL OR expires_at < datetime('now') "
-            "             THEN datetime('now') ELSE expires_at END, ?), "
+            "    last_used_at = ?, "
+            "    expires_at = ?, "
+            "    importance = ?, "
             "    state = CASE WHEN ? AND state = 'archived' THEN 'active' ELSE state END, "
             "    updated_at = datetime('now') "
             "WHERE id = ?",
-            (REINFORCE_WINDOW, 1 if revive else 0, memory_id),
+            (last_used_at, expires_at, importance, 1 if revive else 0, memory_id),
         )
     return get_memory(conn, memory_id)
 

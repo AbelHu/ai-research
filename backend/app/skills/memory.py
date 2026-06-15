@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.memory.reinforce import reinforce_memory
 from app.skills.context import SkillContext
 from app.skills.registry import skill
 from app.storage.repos import memories as memories_repo
@@ -96,7 +97,7 @@ class GetMemoryResult(BaseModel):
 )
 def memory_get(params: GetMemoryParams, ctx: SkillContext) -> GetMemoryResult:
     # A deliberate read reinforces the item (§9.1); no revive on the hot path.
-    mem = memories_repo.touch_memory(ctx.conn, params.memory_id, revive=False)
+    mem = reinforce_memory(ctx.conn, params.memory_id, revive=False)
     if mem is None:
         return GetMemoryResult(memory=None)
     return GetMemoryResult(memory=_to_hit(ctx, mem))

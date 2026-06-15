@@ -51,3 +51,33 @@ class FakeProvider:
         self.calls.append(req)
         vectors = [[0.0] * self._embed_dim for _ in req.texts]
         return EmbedResponse(vectors=vectors, model=self.model)
+
+
+# A small controlled vocabulary for the deterministic bag-of-words embedder
+# below. Each word is one dimension, so texts sharing words are "near".
+_EMBED_VOCAB = (
+    "paris",
+    "france",
+    "capital",
+    "weather",
+    "rain",
+    "recipe",
+    "soup",
+    "onion",
+    "vector",
+    "search",
+)
+
+
+def fake_embed(texts, vocab=_EMBED_VOCAB):
+    """A deterministic, offline bag-of-words embedder for vector-search tests.
+
+    Each text maps to a fixed-width vector counting how often each vocabulary
+    word appears (case-insensitive). Texts that share words get a high cosine
+    similarity, so nearest-neighbour assertions are predictable without a model.
+    """
+    out = []
+    for text in texts:
+        lowered = text.lower()
+        out.append([float(lowered.count(word)) for word in vocab])
+    return out

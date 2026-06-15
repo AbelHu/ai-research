@@ -23,6 +23,37 @@ DEFAULT_POLICIES_CONFIG = REPO_ROOT / "config" / "policies.yaml"
 ProgressUpdates = Literal["none", "phase", "task"]
 
 
+class MemoryPolicy(BaseModel):
+    """Deterministic memory weighting / TTL knobs (design-spec §9.1).
+
+    These tune the effective-weight formula and the retention clock; the AI
+    never sets them. ``core`` has no decay and no TTL, so it has no knobs here.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # Reinforcement coefficient β in (1 + β·ln(1 + use_count)).
+    reinforce_beta: float = Field(default=0.3, ge=0)
+    # Bounded importance bump applied on each reinforcing read (capped at 1.0).
+    reinforce_importance_step: float = Field(default=0.02, ge=0)
+    # Max extra TTL (days) granted on a reinforcing read, scaled by importance.
+    importance_ttl_scale_days: float = Field(default=30.0, ge=0)
+    # Base TTL (days) per retention class on write; scaled by (1 + importance).
+    base_ttl_ephemeral_days: float = Field(default=1.0, ge=0)
+    base_ttl_short_days: float = Field(default=14.0, ge=0)
+    base_ttl_long_days: float = Field(default=180.0, ge=0)
+    # Recency-decay rate λ (per day) per class; larger = forgets faster.
+    decay_lambda_ephemeral: float = Field(default=1.0, ge=0)
+    decay_lambda_short: float = Field(default=0.1, ge=0)
+    decay_lambda_long: float = Field(default=0.02, ge=0)
+    # A 'long' item whose effective weight falls below this archives on sweep.
+    archive_threshold: float = Field(default=0.05, ge=0)
+    # On expiry: importance at/below this may be dropped; above it → archived.
+    drop_importance_max: float = Field(default=0.5, ge=0, le=1)
+    # A 'short' item used at least this many times is promoted to 'long'.
+    promote_use_count: int = Field(default=5, ge=1)
+
+
 class Policies(BaseModel):
     """Typed policy knobs. Field defaults are the documented platform defaults.
 
@@ -44,6 +75,8 @@ class Policies(BaseModel):
     # JS/bot challenges, paywalls) that an AI/browser could pass — a first cut to
     # be hardened later, not a permanent limitation.
     verify_citation_urls: bool = True
+    # Deterministic memory weighting / TTL knobs (§9.1).
+    memory: MemoryPolicy = Field(default_factory=MemoryPolicy)
 
 
 def load_policies(path: Path | None = None) -> Policies:

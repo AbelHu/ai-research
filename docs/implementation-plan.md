@@ -202,23 +202,23 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 > Goal: real hybrid search + TTL lifecycle + on-disk library with final reports.
 
-- [ ] **T5.1 — FTS5 keyword search.** `*_fts` mirrors + `MemoryService.keyword_search`.
+- [x] **T5.1 — FTS5 keyword search.** `*_fts` mirrors + `MemoryService.keyword_search`.
   - *Validate:* test indexes 3 memories, queries, ranks.
-- [ ] **T5.2 — Embeddings + vector search (sqlite-vec).** Wire `embedder` role; store/query vectors (embedding inputs already pass the redaction guard — T0.7). *(Decision: confirm `sqlite-vec` dependency — see Open decisions.)*
+- [x] **T5.2 — Embeddings + vector search (pure-Python).** Wire `embedder` role; store/query vectors (embedding inputs already pass the redaction guard — T0.7). *(Decided: pure-Python brute-force cosine over the `embeddings` blob — no `sqlite-vec` dependency; offline + hash-pinned. The `vector_search` surface lets a `sqlite-vec` backend swap in later — Open decision #3.)*
   - *Validate:* test embeds via fake embedder + nearest-neighbor returns expected id.
-- [ ] **T5.3 — Hybrid ranking (RRF).** Merge FTS + vector deterministically.
+- [x] **T5.3 — Hybrid ranking (RRF).** Merge FTS + vector deterministically.
   - *Validate:* test: hybrid beats either alone on a planted example.
-- [ ] **T5.4 — Effective-weight + TTL fields.** Implement `w_eff` formula + `expires_at` on write (§9.1).
+- [x] **T5.4 — Effective-weight + TTL fields.** Implement `w_eff` formula + `expires_at` on write (§9.1).
   - *Validate:* `tests/test_weight.py` checks decay + reinforcement math.
-- [ ] **T5.5 — Reinforcement on use/read.** Hook reads (T2.6) + validated-answer use to slide TTL.
+- [x] **T5.5 — Reinforcement on use/read.** Hook reads (T2.6) + validated-answer use to slide TTL.
   - *Validate:* test: read extends `expires_at` past prior value; revive archived→active.
-- [ ] **T5.6 — Daily sweep job (expire/decay/archive/consolidate/drop).** `app/memory/sweep.py`, deterministic; drop = delete hot rows + tombstone + move to `index.dropped.json`.
+- [x] **T5.6 — Daily sweep job (expire/decay/archive/consolidate/drop).** `app/memory/sweep.py`, deterministic; drop = delete hot rows + tombstone + move to `index.dropped.json`.
   - *Validate:* `tests/test_sweep.py` over a seeded set → expected state transitions.
-- [ ] **T5.7 — Folder library + index files.** `app/memory/library.py` — `data/library/Active/{Simple,Tasks,Features}/<id>/`, `index.json`, `index.dropped.json`.
+- [x] **T5.7 — Folder library + index files.** `app/memory/library.py` — `data/library/Active/{Simple,Tasks,Features}/<id>/`, `index.json`, `index.dropped.json`.
   - *Validate:* test writes an ask folder + updates `index.json`.
-- [ ] **T5.8 — Final report assembly + Librarian commit.** Build the §9.2 JSON, validate, single-writer commit to `final_reports`+`library_index`+folder.
+- [x] **T5.8 — Final report assembly + Librarian commit.** Build the §9.2 JSON, validate, single-writer commit to `final_reports`+`library_index`+folder.
   - *Validate:* test: ask run produces a committed final report on disk + DB.
-- [ ] **T5.9 — Archive compaction.** Zip artifacts-except-final_report on cold; revive/unzip on read.
+- [x] **T5.9 — Archive compaction.** Zip artifacts-except-final_report on cold; revive/unzip on read.
   - *Validate:* test: archive → `artifacts.zip` present, `final_report.md` readable; read revives.
 - ✅ **Checkpoint P5** — memory stays small, fresh, recoverable; asks archived.
 
@@ -320,7 +320,7 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 ## Open decisions to confirm during review
 1. **Models config shape — decide before P3.** Keep the current single `config/models.yaml` (roles+providers), or migrate to the spec's `config/models/` folder + `model-bindings.yaml` (§7.0)? This **blocks P3** (templates, per-agent-role overrides, provider selection all key off it) and churns later if changed mid-stream. *(Recommend: keep the single file through P6; add `model-bindings.yaml` only when a per-agent-role override is actually needed.)*
 2. **Per-job concurrency mechanism — DECIDED (2026-06-15): in-process `asyncio` runner, not a child process.** The work is I/O-bound, the durable truth is already folders + DB, and pause/resume/abandon + `/req` status sharing are far simpler in one address space; `asyncio` `cancel()` also gives clean cooperative abandon that OS threads can't. Isolation is **logical** (own `JobContext` + folder + inbox); a CPU-bound *skill* can be offloaded to a `ProcessPoolExecutor` if ever needed. Spec §6A/§6B updated to match. *(Revisit only if hard fault isolation / force-kill becomes necessary; the recovery contract makes that promotion cheap.)*
-3. **`sqlite-vec` dependency** for vectors (P5.2) — acceptable to add, or prefer a pure-Python fallback first?
+3. **`sqlite-vec` dependency** for vectors (P5.2) — **DECIDED (2026-06-15): pure-Python first, no `sqlite-vec`.** Vectors are stored as float32 blobs in the existing `embeddings` table and searched with deterministic brute-force cosine (`app/memory/vectors.py`), so the suite stays fully offline + hash-pinned with **no new dependency**. The `vector_search` surface is deliberately small so a `sqlite-vec` (ANN) backend can replace the internals later — revisit only when the hot set grows large enough that brute-force latency matters.
 4. **Web frontend scope** (P9.6) — full React/Vite now, or REST + a minimal HTML page until later?
 5. **Test doubles for GitHub/Bing/Telegram** — confirm we mock all external HTTP in unit tests (no live calls in CI). *(Recommend: yes.)*
 6. **Phase ordering** — OK to defer auth/pairing (P7) until after the CLI core (P4–P6), or do you want pairing earlier?
