@@ -79,7 +79,6 @@ def test_complete_request_shape(monkeypatch: pytest.MonkeyPatch) -> None:
             messages=[{"role": "user", "content": "ping"}],
             temperature=0.5,
             max_tokens=16,
-            response_format={"type": "json_object"},
         )
     )
 
@@ -94,7 +93,9 @@ def test_complete_request_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["messages"] == [{"role": "user", "content": "ping"}]
     assert body["temperature"] == 0.5
     assert body["max_tokens"] == 16
-    assert body["response_format"] == {"type": "json_object"}
+    # We never send `response_format` (JSON mode) — some models 400 on it; the
+    # body's Content-Type is JSON and the prompt drives a JSON reply instead.
+    assert "response_format" not in body
 
     # Response is parsed into the typed shape.
     assert resp.text == "pong"

@@ -75,7 +75,6 @@ class CompletionRequest:
     messages: list[dict]
     temperature: float = 0.2
     max_tokens: int | None = None
-    response_format: dict | None = None
 
 
 @dataclass
@@ -146,8 +145,12 @@ class OpenAICompatibleProvider:
         }
         if req.max_tokens is not None:
             payload["max_tokens"] = req.max_tokens
-        if req.response_format is not None:
-            payload["response_format"] = req.response_format
+        # We deliberately do NOT send `response_format` (OpenAI JSON mode): the
+        # request body is already JSON (Content-Type: application/json) and the
+        # prompt templates ask for a JSON reply, which the advisor wrapper parses
+        # (code-fence-tolerant) + repairs. Some providers (reasoning / local
+        # models) reject `response_format` with a 400, so omitting it keeps the
+        # transport compatible with the widest set of OpenAI-style endpoints.
 
         with httpx.Client(timeout=self._timeout) as client:
             resp = client.post(

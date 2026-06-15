@@ -181,8 +181,7 @@ def run_live(models: ModelsConfig, getenv: Getenv) -> int:
         elif code == 400:
             print("       The model rejected a request field. Common causes:")
             print("       - the model only allows the default temperature (e.g. reasoning models),")
-            print("       - it needs 'max_completion_tokens' rather than 'max_tokens', or")
-            print("       - it doesn't support response_format json_object.")
+            print("       - it needs 'max_completion_tokens' rather than 'max_tokens'.")
         return 1
     except httpx.HTTPError as exc:
         print(f"[fail] Network error during completion: {exc}")

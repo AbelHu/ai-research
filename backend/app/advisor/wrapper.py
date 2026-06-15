@@ -469,11 +469,7 @@ class Advisor:
         valid; otherwise the corrective instruction names the problems found.
         """
         messages = [{"role": "user", "content": prompt}]
-        resp = provider.complete(
-            CompletionRequest(
-                messages=messages, temperature=0.0, response_format={"type": "json_object"}
-            )
-        )
+        resp = provider.complete(CompletionRequest(messages=messages, temperature=0.0))
         parsed, problems = _validate(resp.text, schema, post_validate)
         if parsed is not None:
             return parsed, "valid", resp.text, _tokens(resp)
@@ -483,11 +479,7 @@ class Advisor:
             {"role": "assistant", "content": resp.text},
             {"role": "user", "content": _repair_instruction(template, problems)},
         ]
-        resp2 = provider.complete(
-            CompletionRequest(
-                messages=repair_messages, temperature=0.0, response_format={"type": "json_object"}
-            )
-        )
+        resp2 = provider.complete(CompletionRequest(messages=repair_messages, temperature=0.0))
         parsed2, _ = _validate(resp2.text, schema, post_validate)
         if parsed2 is not None:
             return parsed2, "repaired", resp2.text, _tokens(resp2)
