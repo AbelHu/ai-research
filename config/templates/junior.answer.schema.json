@@ -5,7 +5,6 @@
     "answer": { "type": "string", "minLength": 1 },
     "citations": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "properties": {

@@ -25,6 +25,7 @@ layer is testable with a fake provider and never touches the network.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import time
@@ -44,6 +45,13 @@ from app.config.policies import get_policies
 from app.storage.repos import ai_calls as ai_calls_repo
 
 T = TypeVar("T", bound=BaseModel)
+
+# Audit logger for the AI boundary. Emits one record per model call (role,
+# template, model, validation status, tokens, latency) and, on a failed/repaired
+# reply, the model's response text so it can be inspected. Prompts are already
+# redacted (`redact_text`) and the test log handler scrubs secrets again, so no
+# token ever reaches a log file (§12).
+logger = logging.getLogger("app.advisor")
 
 # Provider selector: maps a model-role ("triage"/"planner"/"drafter") to a provider.
 ProviderResolver = Callable[[str], AIProvider]
@@ -294,14 +302,23 @@ class Advisor:
         request_id: int,
         job_id: int | None = None,
     ) -> AnswerDraft:
-        """Draft a cited answer (template ``junior.answer``).
+        """Draft an answer (template ``junior.answer``).
 
-        No deterministic fallback: an answer must carry a real citation, so an
-        unvalidatable draft **escalates** (raises) rather than fabricating one.
-        Any cited **URL** is verified to exist (§7.1); a fabricated/unreachable
-        link fails validation the same way a bad schema does.
+        **Validation is non-fatal here** (owner policy): the worker always returns
+        the model's templated answer. The citation/URL checks run and are
+        **logged as annotations**, never used to reject:
+
+        * an answer with **no citation** (the model answered from its own
+          knowledge, or honestly couldn't find a source) is returned, with a log
+          note that it is *ungrounded*;
+        * a cited **URL that can't be verified** (§7.1) is returned, with a log
+          note — useful while web access/verification is still limited.
+
+        Only a genuine **schema failure** — the model produces no valid JSON even
+        after one repair — escalates (``AdvisorValidationError``); the Junior
+        Worker degrades that to an honest "couldn't answer" rather than crashing.
         """
-        return self._run(
+        draft = self._run(
             role="drafter",
             template_name="junior.answer",
             variables={"text": text, "hits": json.dumps(hits or [], ensure_ascii=False)},
@@ -309,19 +326,36 @@ class Advisor:
             request_id=request_id,
             job_id=job_id,
             fallback=None,
-            post_validate=self._verify_answer_citations,
         )
+        self._annotate_answer_validation(draft)
+        return draft
 
-    def _verify_answer_citations(self, draft: BaseModel) -> list[str]:
-        """Flag any cited URL that doesn't exist (anti-hallucination, §7.1).
+    def _annotate_answer_validation(self, draft: AnswerDraft) -> None:
+        """Log citation/URL validation as a **non-fatal** annotation (never raises).
+
+        This is the "add the validation in the response but do not fail the
+        request" policy: we still surface whether the answer is grounded + whether
+        its URLs resolve, but the answer is returned regardless.
+        """
+        if not draft.citations:
+            logger.warning(
+                "answer is ungrounded: the model cited no source "
+                "(answered from model knowledge or could not find one)"
+            )
+            return
+        for problem in self._verify_answer_citations(draft):
+            logger.warning("answer citation check: %s", problem)
+
+    def _verify_answer_citations(self, draft: AnswerDraft) -> list[str]:
+        """Return any cited URL that doesn't exist (anti-hallucination, §7.1).
 
         Skipped entirely when ``verify_citations`` is off (config knob
         ``verify_citation_urls``) — cited URLs are then kept as provenance but
         not fetched, the documented escape hatch for anti-crawler false negatives.
+        The result is **logged, not raised** (see `_annotate_answer_validation`).
         """
         if not self.verify_citations:
             return []
-        assert isinstance(draft, AnswerDraft)
         return [
             f"cited URL could not be verified to exist: {url}"
             for url in unresolved_citation_urls(draft.citations, self.verify_url)
@@ -349,6 +383,14 @@ class Advisor:
         # Redact at the wrapper boundary too (defense in depth over the provider).
         prompt = redact_text(template.render(**variables))
         provider = self.resolve_provider(role)
+        logger.info(
+            "advisor call: role=%s template=%s model=%s request_id=%s job_id=%s",
+            role,
+            template.id,
+            provider.model,
+            request_id,
+            job_id,
+        )
 
         started = time.monotonic()
         value, status, last_response, tokens = self._call_with_repair(
@@ -360,6 +402,27 @@ class Advisor:
             value, status = fallback(), "fallback"
         elif value is None:
             status = "failed"
+
+        logger.info(
+            "advisor result: role=%s template=%s status=%s tokens=%s latency_ms=%s",
+            role,
+            template.id,
+            status,
+            tokens,
+            latency_ms,
+        )
+        # Always log the model's reply (redacted + truncated) so every call is
+        # auditable in the run logs — you can see exactly what the model said and,
+        # on a non-valid reply, why validation rejected it. The text is run
+        # through the redaction guard first (model output shouldn't hold our
+        # secrets, but be safe anyway, §12).
+        logger.info(
+            "advisor response: role=%s template=%s status=%s response=%s",
+            role,
+            template.id,
+            status,
+            redact_text(last_response or "")[:2000],
+        )
 
         ai_calls_repo.record_ai_call(
             self.conn,

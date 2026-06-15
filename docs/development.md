@@ -221,23 +221,120 @@ implementation plan.
 
 ## 6. Running the tests
 
-The suite is designed to run **offline and deterministically** — an autouse
-guard in [tests/conftest.py](../backend/tests/conftest.py) raises if any test
-tries to open a real network socket. Use a fake provider or mock the `httpx`
-transport instead.
+There are **two suites**: the default **unit** suite (fully offline) and an
+opt-in **integration** suite that calls a **real** AI model. Every run also
+writes a **detailed, secret-free log file** you can audit (see §6.3).
+
+### 6.1 Unit tests (default — offline, deterministic)
+
+The default suite runs **offline**: an autouse guard in
+[tests/conftest.py](../backend/tests/conftest.py) raises if any test opens a real
+network socket, and the live `integration` tests are **deselected by default**.
 
 ```bash
 cd backend
 
-# Whole suite
+# Whole unit suite (integration tests are excluded automatically)
 ../.venv/bin/python -m pytest -q
 
-# A single file
+# A single file / a single test
 ../.venv/bin/python -m pytest tests/test_security.py -q
-
-# A single test
 ../.venv/bin/python -m pytest tests/test_security.py::test_reveal_returns_value -q
+
+# Verbose (per-test PASS/FAIL) and show prints
+../.venv/bin/python -m pytest -v
+../.venv/bin/python -m pytest -v -s
 ```
+
+If a unit test needs a model, it uses a **fake provider** or an
+`httpx.MockTransport` — never the network.
+
+### 6.2 Integration tests (opt-in — real AI model)
+
+These call a **real** model end-to-end. They are marked `integration`,
+**excluded from the default run**, and **skipped** (not failed) unless a model
+provider is configured — so running them without credentials is safe.
+
+**First, configure a provider** (one of):
+
+- **Route A — device-flow login (no PAT):**
+  ```bash
+  ../.venv/bin/python -m app.cli.login        # approve the device code in your browser
+  ```
+  then point the model roles at GitHub Copilot in `config/models.yaml`
+  (`kind: github_copilot`, bare model ids like `gpt-4o`).
+- **Route B — GitHub Models PAT:** set `GITHUB_MODELS_TOKEN` in `.env` and keep
+  `kind: github_models` in `config/models.yaml`.
+
+> Tip: `../.venv/bin/python -m app.cli.verify --dry-run` reports whether your
+> chosen provider is ready (a token is set, or you're logged in).
+
+**Then run them:**
+
+```bash
+cd backend
+
+# Run only the live integration tests (real model calls)
+../.venv/bin/python -m pytest -m integration -v
+
+# Show skip reasons (e.g. "not logged in" / token unset)
+../.venv/bin/python -m pytest -m integration -rs
+
+# Everything: unit + integration
+../.venv/bin/python -m pytest -m "integration or not integration"
+```
+
+What they prove: the real model's output survives our strict template-schema
+validation (anti-hallucination), and a simple ask runs end-to-end. **Skipped**
+means unconfigured; real timing (e.g. `5 passed in 12s`) means live calls
+actually happened.
+
+### 6.3 Auditing the test logs
+
+Every `pytest` run writes one timestamped log file under **`backend/logs/`**
+(git-ignored), labelled by suite:
+
+```
+backend/logs/unit-YYYYMMDD-HHMMSS.log          # a default (unit) run
+backend/logs/integration-YYYYMMDD-HHMMSS.log   # a `-m integration` run
+```
+
+The path is printed at the end of every run (`Detailed log written to: …`).
+Each **test case** is a delimited section containing:
+
+- `----- START <test id> -----`
+- the application logs emitted during it — notably **each advisor model call**
+  (`advisor call: role=… template=… model=…`) and its **result**
+  (`advisor result: … status=valid|repaired|fallback|failed tokens=… latency_ms=…`);
+  a non-`valid` reply also logs the model's (redacted) response so you can see
+  *why* validation failed;
+- the outcome line — `PASSED` / `FAILED` / `SKIPPED (reason)` with duration;
+- on failure, the full `TRACEBACK …`.
+
+**Secrets never appear:** a redaction filter scrubs any token-looking text from
+every record before it is written (defense-in-depth on top of the `Secret` type),
+so the files are safe to keep and share.
+
+```bash
+# Tail the most recent log
+ls -t backend/logs/*.log | head -1 | xargs tail -f
+
+# Just the model calls from the last integration run
+grep "advisor " "$(ls -t backend/logs/integration-*.log | head -1)"
+
+# Every failure with its traceback
+grep -A20 "TRACEBACK" "$(ls -t backend/logs/*.log | head -1)"
+```
+
+> Note: integration tests use an in-memory DB, so their `ai_calls` rows are not
+> persisted. For a **durable** model-call audit, run the `ask` CLI (it writes to
+> `data/app.db`) and query the `ai_calls` table:
+> ```bash
+> ../.venv/bin/python -m app.cli.ask "what is 2+2?"
+> ../.venv/bin/python -m app.cli.db --schema   # confirms the DB + tables
+> ```
+> `ai_calls` stores prompt/response as **SHA-256 refs** (no raw text), by design
+> (§12); the readable model output is in the run log above and the CLI output.
 
 ---
 

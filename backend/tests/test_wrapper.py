@@ -209,18 +209,40 @@ def test_answer_returns_validated_answer_with_citation(db) -> None:
     assert result.citations[0].ref == "memory:12"
 
 
-def test_zero_citation_answer_is_rejected_and_escalates(db) -> None:
+def test_zero_citation_answer_is_accepted(db) -> None:
     conn, request_id = db
-    provider = FakeProvider(ZERO_CITATION_ANSWER)  # repeats -> repair also invalid
+    provider = FakeProvider(ZERO_CITATION_ANSWER)
     advisor = _advisor(conn, provider)
 
+    # Non-fatal policy: an ungrounded answer (no citation) is returned, not
+    # rejected. The model answered from its own knowledge / honestly couldn't
+    # cite a source; the worker still gets a usable, templated answer.
+    result = advisor.answer(text="what is the capital of France?", request_id=request_id)
+
+    assert isinstance(result, AnswerDraft)
+    assert result.citations == []
+    assert result.answer == "Paris."
+    # The reply is schema-valid (empty citations are allowed now); one call only.
+    row = ai_calls_repo.list_ai_calls(conn, request_id)[0]
+    assert row["validation_status"] == "valid"
+    assert len(provider.calls) == 1
+
+
+def test_answer_with_no_valid_json_still_escalates(db) -> None:
+    conn, request_id = db
+    provider = FakeProvider(MALFORMED)  # never valid JSON, even after one repair
+    advisor = _advisor(conn, provider)
+
+    # Validation is non-fatal for *content* (citations/URLs), but a genuine
+    # schema failure — the model never produces a usable object — still escalates
+    # (no fallback for answers). The Junior Worker degrades this to an honest
+    # "couldn't answer" rather than fabricating one.
     with pytest.raises(AdvisorValidationError):
         advisor.answer(text="what is the capital of France?", request_id=request_id)
 
-    # The failed call is still audited.
     row = ai_calls_repo.list_ai_calls(conn, request_id)[0]
     assert row["validation_status"] == "failed"
-    assert len(provider.calls) == 2  # initial + one repair, both rejected
+    assert len(provider.calls) == 2  # initial + one repair, both unusable
 
 
 # --- template-requirement validation (anti-hallucination, §6D/§7) ----------
@@ -279,34 +301,33 @@ def test_answer_with_existing_cited_url_is_accepted(db) -> None:
     assert row["validation_status"] == "valid"
 
 
-def test_answer_with_hallucinated_url_is_rejected_and_escalates(db) -> None:
+def test_answer_with_unverifiable_url_is_returned_not_rejected(db) -> None:
     conn, request_id = db
-    provider = FakeProvider(ANSWER_WITH_URL)  # repeats -> repair also has the bad URL
+    provider = FakeProvider(ANSWER_WITH_URL)
+    checked: list[str] = []
 
-    # Verifier reports the cited URL does NOT exist -> fabricated link.
-    advisor = Advisor(
-        resolve_provider=lambda role: provider, conn=conn, verify_url=lambda url: False
-    )
+    # The verifier reports the cited URL does NOT exist. Under the non-fatal
+    # policy the answer is still returned (the failure is logged as an
+    # annotation), not escalated — "add the validation but do not fail the
+    # request".
+    def _verify(url: str) -> bool:
+        checked.append(url)
+        return False
 
-    with pytest.raises(AdvisorValidationError):
-        advisor.answer(text="capital of France?", request_id=request_id)
+    advisor = Advisor(resolve_provider=lambda role: provider, conn=conn, verify_url=_verify)
 
-    assert len(provider.calls) == 2  # initial + one repair, both rejected
+    result = advisor.answer(text="capital of France?", request_id=request_id)
+
+    assert result.citations[0].url == "https://real.example/france"
+    assert checked == ["https://real.example/france"]  # it WAS checked (annotation)
+    assert len(provider.calls) == 1  # no repair loop; returned as-is
     row = ai_calls_repo.list_ai_calls(conn, request_id)[0]
-    assert row["validation_status"] == "failed"
+    assert row["validation_status"] == "valid"  # schema-valid; URL check is non-fatal
 
 
-def test_answer_with_bad_url_repairs_to_a_real_one(db) -> None:
+def test_answer_with_url_is_checked_once_no_repair(db) -> None:
     conn, request_id = db
-    bad = json.dumps(
-        {
-            "answer": "Paris.",
-            "citations": [{"ref": "web:1", "url": "https://fake.example/nope"}],
-            "confidence": 0.7,
-        }
-    )
-    provider = FakeProvider([bad, ANSWER_WITH_URL])  # repair returns a real URL
-
+    provider = FakeProvider(ANSWER_WITH_URL)
     advisor = Advisor(
         resolve_provider=lambda role: provider,
         conn=conn,
@@ -315,10 +336,11 @@ def test_answer_with_bad_url_repairs_to_a_real_one(db) -> None:
 
     result = advisor.answer(text="capital of France?", request_id=request_id)
 
+    # The URL exists, so it's accepted; no repair loop either way (non-fatal).
     assert result.citations[0].url == "https://real.example/france"
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 1
     row = ai_calls_repo.list_ai_calls(conn, request_id)[0]
-    assert row["validation_status"] == "repaired"
+    assert row["validation_status"] == "valid"
 
 
 def test_answer_without_url_citation_skips_verification(db) -> None:

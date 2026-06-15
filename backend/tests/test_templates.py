@@ -31,9 +31,13 @@ def test_loads_response_schema() -> None:
     }
 
 
-def test_answer_schema_requires_at_least_one_citation() -> None:
+def test_answer_schema_requires_citations_field_but_allows_empty() -> None:
     tmpl = load_template("junior.answer")
-    assert tmpl.schema["properties"]["citations"]["minItems"] == 1
+    # `citations` is a required field (provenance must be present in the object),
+    # but it MAY be empty: an ungrounded / "don't know" answer is allowed and
+    # validated non-fatally rather than rejected.
+    assert "citations" in tmpl.schema["required"]
+    assert "minItems" not in tmpl.schema["properties"]["citations"]
 
 
 def test_missing_variable_raises() -> None:

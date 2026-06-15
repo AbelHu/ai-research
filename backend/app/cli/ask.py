@@ -14,6 +14,7 @@ end-to-end test drives the same control loop with a fake provider.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from collections.abc import Callable
@@ -25,6 +26,7 @@ from app.advisor.providers import AIProvider, MissingCredentialError, build_prov
 from app.advisor.wrapper import Advisor
 from app.config.settings import REPO_ROOT, ModelsConfig, load_models_config
 from app.roles.control import AskOutcome, ensure_owner, run_ask
+from app.runlog import setup_run_logging
 from app.storage.db import connect
 from app.storage.migrations import migrate
 
@@ -48,7 +50,9 @@ def build_resolver(
 
 
 def _print_outcome(outcome: AskOutcome) -> None:
-    if outcome.status == "answered":
+    if outcome.status in ("answered", "unanswered"):
+        # Both carry a PM-formatted delivery (the answer, or an honest
+        # "couldn't answer from a source" message).
         print(outcome.delivery)
     elif outcome.status == "needs_clarification":
         print(f"/req {outcome.request.code} needs clarification:")
@@ -72,9 +76,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--db", type=Path, default=None, help="database file (default: data/app.db)"
     )
+    parser.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        help="debug mode: stream all logs (incl. the model's response) to the console",
+    )
     args = parser.parse_args(argv)
 
     load_dotenv(REPO_ROOT / ".env", override=False)
+
+    # Every run is always logged (redacted) to backend/logs/ask-<ts>.log so the
+    # full model response stays auditable on disk. In --debug mode the same logs
+    # are *also* streamed to the console at DEBUG level, so you can see exactly
+    # what happened (each advisor call, the model's reply, validation notes).
+    log_path = setup_run_logging("ask", console_level=logging.DEBUG if args.debug else None)
 
     try:
         models = load_models_config()
@@ -93,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         _print_outcome(outcome)
     finally:
         conn.close()
+    print(f"\n[log] full run log (model response included): {log_path}")
     return 0
 
 

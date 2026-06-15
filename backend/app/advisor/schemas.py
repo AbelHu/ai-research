@@ -104,12 +104,16 @@ class Source(_Strict):
 class AnswerDraft(_Strict):
     """Junior Worker's drafted answer (template `junior.answer`, §6D).
 
-    An answer **must** carry at least one citation — a zero-citation draft is
-    rejected at validation (§8.11).
+    ``citations`` is **required but may be empty**: an answer grounded in
+    provided sources should cite them, but an answer from the model's own
+    knowledge — or an honest "I don't have a source for this" — is allowed and
+    **not rejected**. The worker validates citations as a *non-fatal annotation*
+    (logged), so it always returns the model's templated answer rather than
+    failing the request (owner policy, see `Advisor.answer`).
     """
 
     answer: str = Field(..., min_length=1)
-    citations: list[Source] = Field(..., min_length=1)
+    citations: list[Source]
     confidence: float = Field(ge=0.0, le=1.0)
 
 

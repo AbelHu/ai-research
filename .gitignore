@@ -6,6 +6,10 @@
 # Local data (sqlite db, vector index, blobs, reports)
 data/
 
+# Test + run logs (detailed, secret-free; regenerated each run)
+logs/
+backend/logs/
+
 # Python
 __pycache__/
 *.py[cod]

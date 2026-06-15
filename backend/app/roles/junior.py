@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import app.skills  # noqa: F401  -- ensure @skill registration (memory.search)
 from app.advisor.schemas import AnswerDraft
-from app.advisor.wrapper import Advisor
+from app.advisor.wrapper import Advisor, AdvisorValidationError
 from app.roles.envelope import Action, Role, RoleMessage
 from app.skills import runtime
 from app.skills.context import SkillContext
@@ -50,7 +50,7 @@ def _hits_for_model(hits: list) -> list[dict]:
 
 @dataclass(frozen=True)
 class JuniorResult:
-    answer: AnswerDraft
+    answer: AnswerDraft | None  # None when no citable answer could be produced
     envelope: RoleMessage  # the `ask_done` hand-off to the Boss
 
 
@@ -73,12 +73,20 @@ def answer_ask(
     search = runtime.execute("memory.search", {"query": card["text"], "limit": search_limit}, ctx)
     hits = _hits_for_model(search.value.hits)
 
-    draft = advisor.answer(
-        text=card["text"],
-        hits=hits,
-        request_id=card["request_id"],
-        job_id=job_id,
-    )
+    try:
+        draft: AnswerDraft | None = advisor.answer(
+            text=card["text"],
+            hits=hits,
+            request_id=card["request_id"],
+            job_id=job_id,
+        )
+    except AdvisorValidationError:
+        # The advisor escalated: the model produced no usable answer object even
+        # after one repair (a genuine schema failure). Citation/URL checks are
+        # non-fatal and never land here. Degrade gracefully: emit `ask_done`
+        # with no answer so the PM tells the user honestly, rather than letting
+        # the escalation crash the run.
+        draft = None
 
     envelope = RoleMessage(
         request_id=card["request_id"],
@@ -86,7 +94,11 @@ def answer_ask(
         from_role=Role.junior,
         to_role=Role.boss,
         action=Action.ask_done,
-        payload={"answer": draft.model_dump(), "card": card},
+        payload={
+            "answer": draft.model_dump() if draft is not None else None,
+            "unanswered": draft is None,
+            "card": card,
+        },
         template="junior.answer@v1",
     )
     return JuniorResult(answer=draft, envelope=envelope)

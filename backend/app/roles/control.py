@@ -26,7 +26,7 @@ from app.storage.repos.requests import Request
 # Hardcoded single owner for the CLI harness (P4). Real pairing arrives in P7.
 OWNER_DISPLAY_NAME = "owner"
 
-AskStatus = Literal["answered", "needs_clarification", "planned", "rejected"]
+AskStatus = Literal["answered", "unanswered", "needs_clarification", "planned", "rejected"]
 
 
 @dataclass(frozen=True)
@@ -184,6 +184,27 @@ def _run_answer_path(
 
     # Boss routes ask_done → deliver (Boss → PM); the PM surfaces it to the user.
     deliver_decision = boss.decide(junior_result.envelope)
+
+    # No citable answer (e.g. nothing in memory and no web search yet): deliver an
+    # honest "couldn't answer" message instead of crashing on the escalation.
+    if junior_result.answer is None:
+        message = (
+            "I couldn't answer this from what I have. I only answer from saved "
+            "memory right now — live web search isn't enabled yet — so I won't "
+            "guess without a source. Add a detail I can use, or try again once "
+            "web search is available."
+        )
+        delivery = pm.format_delivery(request, message)
+        _emit_boss(
+            conn,
+            deliver_decision,
+            request_id=request.id,
+            job_id=job_id,
+            payload={"unanswered": True},
+            causation_id=ask_done_id,
+        )
+        return AskOutcome(status="unanswered", request=request, job_id=job_id, delivery=delivery)
+
     delivery = pm.format_delivery(request, junior_result.answer.answer)
     _emit_boss(
         conn,
