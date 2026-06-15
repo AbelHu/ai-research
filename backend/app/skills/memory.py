@@ -72,7 +72,13 @@ class SearchMemoryResult(BaseModel):
     effect="read",
 )
 def memory_search(params: SearchMemoryParams, ctx: SkillContext) -> SearchMemoryResult:
-    rows = memories_repo.search_memories(ctx.conn, params.query, limit=params.limit)
+    # FTS keyword recall (§9): matches shared keywords, so a natural-language
+    # question finds a memory with overlapping terms (not just a substring).
+    # Vector recall needs an embedder (a model), which a skill never has, so the
+    # deterministic skill does keyword search; hybrid ranking lives a layer up.
+    from app.memory.search import keyword_search
+
+    rows = keyword_search(ctx.conn, params.query, limit=params.limit)
     return SearchMemoryResult(hits=[_to_hit(ctx, m) for m in rows])
 
 

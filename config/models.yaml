@@ -12,18 +12,17 @@ roles:
 
 providers:
   fast:
-    kind: github_models              # OpenAI-compatible API + GitHub auth/headers
-    model: openai/gpt-4o-mini        # {publisher}/{model} ID format
-    api_key_env: GITHUB_MODELS_TOKEN # fine-grained PAT with `models: read`
-    org_env: GITHUB_ORG              # optional -> org-attributed endpoint
+    kind: github_copilot             # Route A: device-flow login (python -m app.cli.login)
+    model: gpt-4o-mini               # bare model id (no {publisher}/ prefix)
 
   quality:
-    kind: github_models
-    model: openai/gpt-4o
-    api_key_env: GITHUB_MODELS_TOKEN
-    org_env: GITHUB_ORG
+    kind: github_copilot
+    model: gpt-4o
 
   embed:
+    # GitHub Copilot has no embeddings endpoint, so the embedder stays on
+    # GitHub Models (needs GITHUB_MODELS_TOKEN). Only used by vector search
+    # (P5.2) - not by the live integration tests (triage/planner/drafter).
     kind: github_models
     model: openai/text-embedding-3-small
     api_key_env: GITHUB_MODELS_TOKEN
