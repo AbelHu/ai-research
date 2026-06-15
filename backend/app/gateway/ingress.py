@@ -27,6 +27,7 @@ from app.config.policies import Policies, get_policies
 from app.gateway.allowlist import RefusalRateLimiter, check_inbound
 from app.gateway.pairing import pair_with_host_code, request_pairing
 from app.roles.control import AskOutcome, run_ask
+from app.storage.repos import job_queue as job_queue_repo
 
 # Reply copy (kept deterministic + free of internal ids/secrets).
 PAIR_HINT = (
@@ -151,6 +152,21 @@ def handle_inbound(
 
     # 3) Admitted → run the ask control loop and format the reply.
     outcome = run_ask(conn, advisor, inbound.text, user_id=decision.user_id)
+
+    # A complex job (or an escalated ask) is **planned** synchronously but runs in
+    # the background: enqueue it so the job worker executes it and delivers the
+    # result back to this chat later (quoting this message). The immediate reply
+    # just acknowledges the /req (see `_format_outcome`).
+    if outcome.status == "planned" and outcome.job_id is not None:
+        job_queue_repo.enqueue(
+            conn,
+            outcome.job_id,
+            channel=inbound.channel,
+            chat_id=inbound.chat_id,
+            reply_to_message_id=inbound.message_id,
+            user_id=decision.user_id,
+        )
+
     return IngressResult(
         "answered", _reply(inbound, _format_outcome(outcome)), user_id=decision.user_id
     )

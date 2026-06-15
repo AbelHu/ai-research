@@ -140,23 +140,35 @@ cache (`data/.auth/github.json`). Manage it with:
 process it:
 
 * runs the **Telegram gateway** in the background (long-poll → answer paired
-  users), exactly like `app.cli.telegram`, and
+  users), exactly like `app.cli.telegram`,
+* runs the **job worker** that executes **planned jobs** (a complex task/feature,
+  or a simple ask that needed planning) end-to-end — Senior Worker runs the
+  plan's tasks, the Plan Expert resolves phases, the Company Expert signs off —
+  then delivers the result back to the originating chat, quoting your original
+  message and tagged with its `/req` id, and
 * serves a read-only **dashboard + JSON API** — requests, the
   job→plan→phase→task tree, host/model usage, and paired accounts.
 
 It runs on the **stdlib** (no extra dependency) and **blocks until Ctrl+C**:
 
 ```bash
-../.venv/bin/python -m app.cli.web                 # gateway + dashboard on http://127.0.0.1:8000
+../.venv/bin/python -m app.cli.web                 # gateway + job worker + dashboard
 ../.venv/bin/python -m app.cli.web --port 9000     # choose a dashboard port
-../.venv/bin/python -m app.cli.web --no-bot        # dashboard only (don't start the gateway)
+../.venv/bin/python -m app.cli.web --no-bot        # dashboard only (no gateway/worker)
 ../.venv/bin/python -m app.cli.web -d              # debug: stream logs to the console
 ../.venv/bin/python -m app.cli.web --db /tmp/x.db  # use a specific database file
 ```
 
-The gateway starts automatically when `TELEGRAM_BOT_TOKEN` is set; without a
-token (or with `--no-bot`) the dashboard runs standalone. Paired-account rules
-(§3) still apply — the gateway answers only paired users.
+The gateway + job worker start automatically when `TELEGRAM_BOT_TOKEN` is set;
+without a token (or with `--no-bot`) the dashboard runs standalone. Paired-account
+rules (§3) still apply — the gateway answers only paired users. You can also run
+the worker on its own with `python -m app.cli.jobworker` (`--once` drains the
+queue and exits).
+
+> **Quick vs. planned replies.** A simple ask is answered immediately. Anything
+> that needs planning is acknowledged right away (`/req … I'll work through it`)
+> and the **final answer arrives as a follow-up** once the job worker finishes —
+> quoting your original message so it's clear which request it answers.
 
 Open `http://127.0.0.1:8000` in a local browser for the HTML view, or use the
 JSON API directly (handy for scripting/testing):

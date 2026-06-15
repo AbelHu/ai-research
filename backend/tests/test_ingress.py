@@ -25,6 +25,7 @@ from app.storage.db import connect
 from app.storage.migrations import migrate
 from app.storage.repos import audit as audit_repo
 from app.storage.repos import identities as identities_repo
+from app.storage.repos import job_queue as job_queue_repo
 from app.storage.repos import pairing_codes as pairing_codes_repo
 from app.storage.repos import pairing_requests as pairing_requests_repo
 from tests.fakes import FakeProvider
@@ -224,6 +225,11 @@ def test_paired_sender_unanswerable_ask_is_escalated(conn) -> None:
     assert result.reply is not None and "work through it" in result.reply.text
     # It became a task job (promoted from the misclassified ask).
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE kind = 'task'").fetchone()[0] == 1
+    # …and it was enqueued for the background worker, addressed back to this chat.
+    pending = job_queue_repo.list_by_status(conn, job_queue_repo.PENDING)
+    assert len(pending) == 1
+    assert pending[0].chat_id == "4242"
+    assert pending[0].reply_to_message_id == "7"  # quotes the user's message
 
 
 def test_paired_then_revoked_sender_is_refused(conn) -> None:

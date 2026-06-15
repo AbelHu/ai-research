@@ -11,7 +11,8 @@ This is the long-running **service** entry point. It does two things in one
 process:
 
 * runs the **Telegram gateway** in a background thread (long-poll → gateway →
-  reply), so paired users are answered while the process is up, and
+  reply) plus the **job worker** that executes planned jobs and delivers their
+  results back to chat, so paired users are answered while the process is up, and
 * serves the read-only **dashboard + JSON API** over the stdlib (`wsgiref`).
 
 The gateway starts automatically when ``TELEGRAM_BOT_TOKEN`` is set (skip it with
@@ -37,6 +38,7 @@ from wsgiref.simple_server import make_server
 from dotenv import load_dotenv
 
 from app.advisor.providers import MissingCredentialError
+from app.cli.jobworker import serve_jobs
 from app.cli.telegram import build_bot, serve
 from app.config.settings import REPO_ROOT, get_settings, load_models_config
 from app.runlog import setup_run_logging
@@ -88,6 +90,32 @@ def _run_gateway(db_path: Path) -> None:
             conn.close()
 
 
+def _run_jobworker(db_path: Path) -> None:
+    """Background-thread target: own connection + the job-execution loop.
+
+    Drains planned jobs (Senior Worker + Plan Expert + sign-off) and delivers
+    each result back to its originating chat via the Telegram adapter. Its own
+    SQLite connection shares the WAL database with the gateway + web threads. Any
+    failure is logged and ends the thread without taking down the web app.
+    """
+    conn = None
+    try:
+        settings = get_settings()
+        models = load_models_config()
+        conn = connect(db_path)
+        migrate(conn)
+        adapter, advisor = build_bot(conn, settings=settings, models=models)
+        logger.info("background job worker started")
+        serve_jobs(conn, advisor, adapter.send)
+    except (MissingCredentialError, KeyError, FileNotFoundError) as exc:
+        logger.error("job worker not started (config error): %s", exc)
+    except Exception as exc:  # noqa: BLE001 - keep the web app alive regardless
+        logger.error("job worker stopped: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.cli.web",
@@ -125,7 +153,10 @@ def main(argv: list[str] | None = None) -> int:
             threading.Thread(
                 target=_run_gateway, args=(db_path,), name="telegram-gateway", daemon=True
             ).start()
-            print("[ok]   Telegram gateway starting in the background.")
+            threading.Thread(
+                target=_run_jobworker, args=(db_path,), name="job-worker", daemon=True
+            ).start()
+            print("[ok]   Telegram gateway + job worker starting in the background.")
         elif args.no_bot:
             print("[ok]   --no-bot: serving the dashboard only.")
         else:
