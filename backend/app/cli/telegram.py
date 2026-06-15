@@ -89,6 +89,22 @@ def serve(
             return 0
 
 
+def build_bot(conn, *, settings, models) -> tuple[TelegramAdapter, Advisor]:
+    """Wire a Telegram adapter + Advisor for :func:`serve`.
+
+    Shared by the standalone ``app.cli.telegram`` runner and the web service's
+    background bot thread (``app.cli.web``) so both build the bot identically.
+    The caller owns ``conn`` (each thread must use its own SQLite connection).
+    """
+    resolver = build_resolver(models)
+    adapter = TelegramAdapter(
+        settings.telegram_bot_token,
+        webhook_secret=settings.telegram_webhook_secret,
+    )
+    advisor = Advisor(resolve_provider=resolver, conn=conn)
+    return adapter, advisor
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.cli.telegram",
@@ -114,20 +130,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         models = load_models_config()
-        resolver = build_resolver(models)
     except (MissingCredentialError, KeyError, FileNotFoundError) as exc:
         print(f"[fail] configuration error: {exc}")
         return 1
 
-    adapter = TelegramAdapter(
-        settings.telegram_bot_token,
-        webhook_secret=settings.telegram_webhook_secret,
-    )
     db_path = args.db or (REPO_ROOT / "data" / DEFAULT_DB_NAME)
     conn = connect(db_path)
     try:
         migrate(conn)
-        advisor = Advisor(resolve_provider=resolver, conn=conn)
+        adapter, advisor = build_bot(conn, settings=settings, models=models)
         print("[ok]   Telegram bot running. Press Ctrl-C to stop.")
         return serve(conn, adapter, advisor, once=args.once)
     except KeyboardInterrupt:

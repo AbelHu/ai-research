@@ -50,6 +50,10 @@ After setting `TELEGRAM_BOT_TOKEN` (via the wizard or `.env`), start the bot:
 ../.venv/bin/python -m app.cli.telegram --once   # drain pending updates once, then exit (smoke)
 ```
 
+> **Running as a service?** `python -m app.cli.web` starts this same gateway in
+> the background **and** the dashboard in one process — see §5. Use the
+> standalone runner above when you want the bot **only**.
+
 The bot is **closed to everyone except paired accounts** — a publicly reachable
 bot must refuse strangers. So before you (or anyone) can chat with it, the chat
 account has to be **paired** to the owner. That's §3.
@@ -130,17 +134,29 @@ cache (`data/.auth/github.json`). Manage it with:
 
 ---
 
-## 5. Web dashboard
+## 5. Run as a service (gateway + dashboard)
 
-A read-only dashboard surfaces live state in your browser — requests, the
-job→plan→phase→task tree, host/model usage, and paired accounts. It runs on the
-**stdlib** (no extra dependency) and **blocks until Ctrl+C**:
+`python -m app.cli.web` is the long-running **service** entry point. In one
+process it:
+
+* runs the **Telegram gateway** in the background (long-poll → answer paired
+  users), exactly like `app.cli.telegram`, and
+* serves a read-only **dashboard + JSON API** — requests, the
+  job→plan→phase→task tree, host/model usage, and paired accounts.
+
+It runs on the **stdlib** (no extra dependency) and **blocks until Ctrl+C**:
 
 ```bash
-../.venv/bin/python -m app.cli.web                 # http://127.0.0.1:8000  (Ctrl+C to stop)
-../.venv/bin/python -m app.cli.web --port 9000     # choose a port
+../.venv/bin/python -m app.cli.web                 # gateway + dashboard on http://127.0.0.1:8000
+../.venv/bin/python -m app.cli.web --port 9000     # choose a dashboard port
+../.venv/bin/python -m app.cli.web --no-bot        # dashboard only (don't start the gateway)
+../.venv/bin/python -m app.cli.web -d              # debug: stream logs to the console
 ../.venv/bin/python -m app.cli.web --db /tmp/x.db  # use a specific database file
 ```
+
+The gateway starts automatically when `TELEGRAM_BOT_TOKEN` is set; without a
+token (or with `--no-bot`) the dashboard runs standalone. Paired-account rules
+(§3) still apply — the gateway answers only paired users.
 
 Open `http://127.0.0.1:8000` in a local browser for the HTML view, or use the
 JSON API directly (handy for scripting/testing):
