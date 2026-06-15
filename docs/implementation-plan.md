@@ -339,12 +339,25 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 ## P10 — Web app: FastAPI + dashboard (§11)
 
 > Goal: read-only-first dashboard surfacing live state and generated data.
+>
+> **In progress (2026-06-15).** The **framework-agnostic service layer**
+> (`app/web/services.py`) is built + offline-tested (`tests/test_web_services.py`):
+> `request_overview` / `request_tree` (T10.2 substance), `model_usage` +
+> `system_metrics` (stdlib host metrics, no `psutil` — T10.3 substance), and
+> `list_paired_accounts` / `revoke_account` (T10.5 substance).
+>
+> **HTTP layer: DECIDED — stdlib `wsgiref`, no web-framework dependency** (open #4
+> resolved to option B). It keeps the suite offline + hash-pinned, is fully
+> unit-testable without a socket, and runs until Ctrl+C. The service layer stays
+> framework-agnostic so a FastAPI swap remains possible later. **No auth yet**
+> (local, binds `127.0.0.1`); a cloud deployment wraps auth + TLS in front of the
+> same WSGI app.
 
-- [ ] **T10.1 — FastAPI app + health.** `app/web/main.py` over the same repos/services; `/healthz`.
-  - *Validate:* `tests/test_web_health.py` via `TestClient`.
-- [ ] **T10.2 — Requests API + page.** Live job→plan→phase→task tree + steps/ai_calls.
+- [x] **T10.1 — Web app + health.** `app/web/app.py` (stdlib `wsgiref` WSGI app over the service layer) + `app/cli/web.py` (`python -m app.cli.web`, serves until Ctrl+C); `/healthz` + a minimal HTML dashboard + JSON API (`/api/requests`, `/api/requests/<id>`, `/api/system`, `/api/accounts`, `POST .../revoke`). No auth yet (local).
+  - *Validate:* `tests/test_web_app.py` — the WSGI app is driven with a synthetic `environ` (no socket): health, JSON routes, HTML index (escaped), 404/405, revoke.
+- [ ] **T10.2 — Requests API + page.** Live job→plan→phase→task tree + steps/ai_calls. *(Service + JSON route done in T10.1; richer HTML request-detail page pending.)*
   - *Validate:* test: seeded request renders via the API.
-- [ ] **T10.3 — System API.** CPU/mem/disk (host-metrics service) + model usage aggregated from `ai_calls`.
+- [ ] **T10.3 — System API.** CPU/mem/disk (host-metrics service) + model usage aggregated from `ai_calls`. *(Service + `/api/system` done in T10.1.)*
   - *Validate:* test: usage aggregation matches seeded `ai_calls`.
 - [ ] **T10.4 — Reports & Data Products API + Refresh-now (manual path).** List products + run history; `Refresh now` re-invokes generator skills via code (the **manual** refresh path; scheduled firing is T10.7).
   - *Validate:* test: refresh triggers a deterministic run + a new `reports` row.
@@ -371,7 +384,7 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 1. **Models config shape — decide before P3.** Keep the current single `config/models.yaml` (roles+providers), or migrate to the spec's `config/models/` folder + `model-bindings.yaml` (§7.0)? This **blocks P3** (templates, per-agent-role overrides, provider selection all key off it) and churns later if changed mid-stream. *(Recommend: keep the single file through P6; add `model-bindings.yaml` only when a per-agent-role override is actually needed.)*
 2. **Per-job concurrency mechanism — DECIDED (2026-06-15): in-process `asyncio` runner, not a child process.** The work is I/O-bound, the durable truth is already folders + DB, and pause/resume/abandon + `/req` status sharing are far simpler in one address space; `asyncio` `cancel()` also gives clean cooperative abandon that OS threads can't. Isolation is **logical** (own `JobContext` + folder + inbox); a CPU-bound *skill* can be offloaded to a `ProcessPoolExecutor` if ever needed. Spec §6A/§6B updated to match. *(Revisit only if hard fault isolation / force-kill becomes necessary; the recovery contract makes that promotion cheap.)*
 3. **`sqlite-vec` dependency** for vectors (P5.2) — **DECIDED (2026-06-15): pure-Python first, no `sqlite-vec`.** Vectors are stored as float32 blobs in the existing `embeddings` table and searched with deterministic brute-force cosine (`app/memory/vectors.py`), so the suite stays fully offline + hash-pinned with **no new dependency**. The `vector_search` surface is deliberately small so a `sqlite-vec` (ANN) backend can replace the internals later — revisit only when the hot set grows large enough that brute-force latency matters.
-4. **Web frontend scope** (P10.6) — full React/Vite now, or REST + a minimal HTML page until later?
+4. **Web frontend scope** (P10.6) — **DECIDED (2026-06-15): stdlib `wsgiref` REST + a minimal server-rendered HTML page**, no web-framework dependency (keeps the suite offline + hash-pinned; the WSGI app is socket-free testable + runs until Ctrl+C). The service layer is framework-agnostic, so FastAPI or a React/Vite SPA (T10.6) can layer on later without touching the data services. *(Revisit if a richer SPA is wanted.)*
 5. **Test doubles for GitHub/Bing/Telegram** — confirm we mock all external HTTP in unit tests (no live calls in CI). *(Recommend: yes.)* **Implemented (2026-06-15):** the default `pytest` run is fully offline (a `conftest` guard blocks real sockets); a separate **opt-in** suite marked `integration` (`tests/test_live_integration.py`) calls a **real** model but is **deselected by default** (`addopts = -m 'not integration'`) and **skips** without a configured token — so CI stays offline while `python -m pytest -m integration` exercises a live model on demand.
 6. **Phase ordering** — OK to defer auth/pairing (P7) until after the CLI core (P4–P6), or do you want pairing earlier?
 7. **Cited-URL verification strictness — default ON (2026-06-15).** The deterministic existence check ships **enabled** (`verify_citation_urls: true`), but our fetcher can false-negative on pages guarded by **anti-crawler defenses** (CAPTCHA, JS/bot challenges, paywalls, geofencing) that an AI/browser could open — so it's **disable-able in `config/policies.yaml`**. Planned **hardening (later phase, alongside `web.fetch`):** treat ambiguous/blocked responses as a soft-pass, cross-check existence via the search API, and/or render headless before deciding; revisit whether the default should stay on. *(Open: which hardening lands first, and does the default flip once it's robust?)*

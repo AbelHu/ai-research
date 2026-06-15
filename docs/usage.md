@@ -130,7 +130,43 @@ cache (`data/.auth/github.json`). Manage it with:
 
 ---
 
-## 5. Inspect the database
+## 5. Web dashboard
+
+A read-only dashboard surfaces live state in your browser — requests, the
+job→plan→phase→task tree, host/model usage, and paired accounts. It runs on the
+**stdlib** (no extra dependency) and **blocks until Ctrl+C**:
+
+```bash
+../.venv/bin/python -m app.cli.web                 # http://127.0.0.1:8000  (Ctrl+C to stop)
+../.venv/bin/python -m app.cli.web --port 9000     # choose a port
+../.venv/bin/python -m app.cli.web --db /tmp/x.db  # use a specific database file
+```
+
+Open `http://127.0.0.1:8000` in a local browser for the HTML view, or use the
+JSON API directly (handy for scripting/testing):
+
+| Route | Returns |
+|-------|---------|
+| `GET /healthz` | `{"status":"ok"}` liveness probe |
+| `GET /api/requests` | request index (newest first) |
+| `GET /api/requests/<id>` | one request's job→plan→phase→task tree + steps + `ai_calls` |
+| `GET /api/system` | host metrics (CPU/mem/disk) + model usage from `ai_calls` |
+| `GET /api/accounts` | the paired-account allowlist |
+| `POST /api/accounts/<channel>/<user>/revoke` | revoke an account |
+
+```bash
+# Quick check from another terminal while it runs:
+curl -s http://127.0.0.1:8000/healthz
+curl -s http://127.0.0.1:8000/api/system
+```
+
+> **No authentication yet** — it binds to `127.0.0.1` (local only) by design.
+> `--host 0.0.0.0` exposes it on the network; only do that behind a trusted
+> boundary. A future cloud deployment puts auth + TLS in front of this same app.
+
+---
+
+## 6. Inspect the database
 
 State lives in `data/app.db` (SQLite). Create/inspect the schema:
 
@@ -145,7 +181,7 @@ in the run logs (§6).
 
 ---
 
-## 6. Where things are written
+## 7. Where things are written
 
 | Location | Contents |
 |----------|----------|
@@ -156,7 +192,7 @@ in the run logs (§6).
 
 ---
 
-## 7. Common issues
+## 8. Common issues
 
 - **"You're not paired" when chatting** — the account isn't on the allowlist;
   pair it (§3). Only the owner's accounts are admitted by design.
