@@ -10,7 +10,7 @@ import json
 import pytest
 
 from app.advisor.schemas import Analysis, AnswerDraft, Triage
-from app.advisor.wrapper import Advisor, AdvisorValidationError
+from app.advisor.wrapper import Advisor, AdvisorValidationError, MissingTemplateRequirement
 from app.security import REDACTED
 from app.storage.db import connect
 from app.storage.migrations import migrate
@@ -49,6 +49,18 @@ VALID_ANSWER = json.dumps(
 )
 MALFORMED = "sorry, I can't produce JSON right now"
 ZERO_CITATION_ANSWER = json.dumps({"answer": "Paris.", "citations": [], "confidence": 0.5})
+# Valid-looking triage with an invented extra field — a hallucination the strict
+# template requirement must reject (design-spec §6D/§7).
+HALLUCINATED_TRIAGE = json.dumps(
+    {
+        "kind": "ask",
+        "clarity": "clear",
+        "complexity": "simple",
+        "confidence": 0.9,
+        "rationale": "looks fine",
+        "made_up_field": "should be rejected",
+    }
+)
 
 
 @pytest.fixture
@@ -200,3 +212,37 @@ def test_zero_citation_answer_is_rejected_and_escalates(db) -> None:
     row = ai_calls_repo.list_ai_calls(conn, request_id)[0]
     assert row["validation_status"] == "failed"
     assert len(provider.calls) == 2  # initial + one repair, both rejected
+
+
+# --- template-requirement validation (anti-hallucination, §6D/§7) ----------
+
+
+def test_hallucinated_extra_field_is_rejected(db) -> None:
+    conn, request_id = db
+    provider = FakeProvider(HALLUCINATED_TRIAGE)  # repeats -> repair also rejected
+    advisor = _advisor(conn, provider)
+
+    result = advisor.triage("hello", request_id=request_id)
+
+    # Strict validation rejects the invented field, so we never act on the
+    # hallucinated reply — we fall back to the safe default instead.
+    assert (result.kind, result.clarity, result.complexity) == ("ask", "unclear", "complex")
+    row = ai_calls_repo.list_ai_calls(conn, request_id)[0]
+    assert row["validation_status"] == "fallback"
+
+
+def test_template_without_requirement_is_rejected(tmp_path, db) -> None:
+    conn, request_id = db
+    # A template body with no sibling .schema.json -> no declared requirement.
+    (tmp_path / "triage.classify.md").write_text(
+        "---\nversion: 1\n---\nClassify: {{ text }}", encoding="utf-8"
+    )
+    provider = FakeProvider(VALID_TRIAGE)
+    advisor = Advisor(resolve_provider=lambda role: provider, conn=conn, templates_dir=tmp_path)
+
+    with pytest.raises(MissingTemplateRequirement):
+        advisor.triage("hello", request_id=request_id)
+
+    # Guard fires before the model is called and before any audit row is written.
+    assert provider.calls == []
+    assert ai_calls_repo.list_ai_calls(conn, request_id) == []

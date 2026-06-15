@@ -6,9 +6,17 @@ Every advisor method follows the same pipeline (implementation-plan T3.3-T3.5):
   1. render a versioned template over its inputs (§6D);
   2. **redact** the rendered prompt before it leaves the machine (§12);
   3. call the provider configured for the model-role;
-  4. parse the reply into a pydantic schema; on failure run **one bounded
-     repair** attempt, then a deterministic **fallback** (or escalate);
+  4. **validate the reply against the template's declared response schema (the
+     *template requirement*)** by parsing into the bound pydantic schema in
+     strict mode (extra fields forbidden, so hallucinated keys are rejected);
+     on failure run **one bounded repair** attempt, then a deterministic
+     **fallback** (or escalate);
   5. write an ``ai_calls`` audit row with the final ``validation_status``.
+
+This anti-hallucination contract applies to **every** AI-facing role that calls
+the advisor — the experts (Company Expert, Plan Expert) included: a reply that
+does not meet its template requirement is never acted on (§6D, §7). A template
+that declares no response schema is rejected outright.
 
 The provider is injected via a ``resolve_provider(role)`` callable so the whole
 layer is testable with a fake provider and never touches the network.
@@ -47,6 +55,20 @@ class AdvisorValidationError(RuntimeError):
     def __init__(self, template_id: str) -> None:
         self.template_id = template_id
         super().__init__(f"advisor output failed validation after repair: {template_id}")
+
+
+class MissingTemplateRequirement(RuntimeError):
+    """Raised when a template declares no response schema to validate against.
+
+    A role may never act on an unvalidated reply, so a template with no declared
+    response schema (the *template requirement*) is rejected before any model
+    call \u2014 the anti-hallucination guard that applies to every AI-facing role,
+    experts included (\u00a76D, \u00a77).
+    """
+
+    def __init__(self, template_id: str) -> None:
+        self.template_id = template_id
+        super().__init__(f"template declares no response schema requirement: {template_id}")
 
 
 def _extract_json(text: str) -> str:
@@ -183,6 +205,10 @@ class Advisor:
         fallback: Callable[[], T] | None,
     ) -> T:
         template = load_template(template_name, templates_dir=self.templates_dir)
+        # A role may never act on an unvalidated reply: refuse a template that
+        # declares no response-schema requirement (anti-hallucination, §6D/§7).
+        if not template.schema:
+            raise MissingTemplateRequirement(template.id)
         # Redact at the wrapper boundary too (defense in depth over the provider).
         prompt = redact_text(template.render(**variables))
         provider = self.resolve_provider(role)

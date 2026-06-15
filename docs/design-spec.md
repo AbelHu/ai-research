@@ -600,7 +600,7 @@ class RoleMessage(BaseModel):
 | **Plan Expert** | `phase_done` | task results + provenance | `plan_expert.report` | `PhaseReport` / `FinalReport` (§9.2 schema) | `phase_report` / `final_report` |
 | **Librarian** | `archive` | final report + artifacts | — *(deterministic commit)* | — | `archived` |
 
-> Every payload schema is **pydantic-validated** at the role boundary (like skill params, §8.6); a malformed envelope or AI reply is repaired/retried or escalated, never acted on blindly.
+> Every payload schema is **pydantic-validated** at the role boundary (like skill params, §8.6); a malformed envelope or AI reply is repaired/retried or escalated, never acted on blindly. **This applies to every AI-facing role — explicitly including the experts (Company Expert, Plan Expert): each must validate that the model's reply conforms to its template's declared response schema (the *template requirement*) — required fields, correct types, and *no extra/invented fields* — before the verdict is used. A reply that doesn't meet the template requirement is treated as a hallucination and repaired or escalated, never acted on.**
 
 ### Templates & storage
 - **Templates folder.** Prompt templates + their response JSON-Schemas live in **`config/templates/`** (`<role>.<action>.md` + `.schema.json`), **versioned** like `config/models/` (§7.0) so prompts evolve without code changes; the `template` field pins the exact version used.
@@ -662,7 +662,7 @@ class Advisor:
 **Validation/audit wrapper.** Every advisor call:
 1. Renders a prompt from a **versioned template** (`config/templates/<role>.<action>.md`, §6D).
 2. Calls the provider for the configured **role** (model-role, or per-agent-role override — §7.0).
-3. Parses output into a pydantic schema (structured/JSON mode); on failure → bounded repair/retry → fallback (deterministic default or human question).
+3. **Validates output against the template's declared response schema (the *template requirement*)** by parsing into the bound pydantic schema in **strict mode** (structured/JSON mode, **extra fields forbidden** so hallucinated keys are rejected); on failure → bounded repair/retry → fallback (deterministic default or human question). A template that declares **no** response schema is rejected — a role may never act on an unvalidated reply.
 4. Writes an `ai_calls` audit row (role, model id, prompt/response refs, tokens, latency, validation status) — **never the API token** (§12).
 
 ### 7.0 Model definitions folder & per-role assignment

@@ -12,7 +12,8 @@
       "type": ["object", "null"],
       "properties": {
         "phases": { "type": "array", "items": { "type": "string" } }
-      }
+      },
+      "additionalProperties": false
     },
     "clarify": {
       "type": ["array", "null"],

@@ -310,6 +310,7 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 ## Cross-cutting (apply within the relevant phase, not as big-bang)
 - **Schedules & proactive data products (§11.1):** land the `schedules` table in P1, the generator-skill pipeline in P5/P6, and the scheduler trigger + `Refresh now` in P9.
+- **Template-requirement validation (anti-hallucination):** every AI-facing role — **explicitly including the experts (Company Expert, Plan Expert)** — must validate the model reply against its template's declared response schema (required fields, correct types, **no extra/invented fields**) before using it; a reply that doesn't meet the requirement is repaired or escalated, never acted on (§6D, §7). Enforced centrally by the advisor wrapper (P3) and inherited by every role that calls it (P4, P6).
 - **Audit everywhere:** every AI call → `ai_calls`; every skill → `steps`; every routing hop → `role_messages` (built into P2–P4).
 - **Recovery tests:** each stateful phase (P1, P4, P5, P6) includes a "rebuild from folders+DB after restart" test.
 
