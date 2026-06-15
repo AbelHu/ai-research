@@ -107,6 +107,18 @@ def _check_config(models: ModelsConfig, getenv: Getenv) -> list[str]:
         else:
             problems.append(f"environment variable {env_var} is not set")
 
+    # 3. Route A (github_copilot) needs a device-flow login, not an env var.
+    if any(p.kind == "github_copilot" for p in _referenced_providers(models)):
+        from app.advisor.auth import GitHubCopilotAuth
+
+        if GitHubCopilotAuth().is_logged_in():
+            print("[ok]   GitHub Copilot login found (device-flow token cached).")
+        else:
+            problems.append(
+                "a github_copilot provider is configured but you're not logged in "
+                "(run `python -m app.cli.login`)"
+            )
+
     return problems
 
 

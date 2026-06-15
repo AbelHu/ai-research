@@ -27,6 +27,7 @@ A task is "done" only when **all** of these hold:
 ### Validation toolbox (commands a task may use)
 Run from `backend/` unless noted.
 - **Unit tests:** `python -m pytest -q` (or a single file: `python -m pytest tests/test_x.py -q`)
+- **Live integration tests (manual, opt-in):** `python -m pytest -m integration` — calls a **real** model; excluded from the default run, and **skipped** unless a provider token is configured (`.env` / env). Proves real model output survives our strict validation + a simple ask runs end-to-end.
 - **Type/lint (added in P0.2):** `python -m ruff check .` and `python -m ruff format --check .`
 - **Config check (no network):** `python -m app.cli.verify --dry-run`
 - **Live auth smoke (manual, opt-in):** `python -m app.cli.verify --live`
@@ -256,11 +257,11 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 > Goal: Route A login + bind the chat bot to a single owner; reject everyone else.
 
-- [ ] **T7.1 — Device-flow auth core.** `app/advisor/auth.py` — device code → poll → `gho_` → exchange `copilot_internal/v2/token` → cache+refresh (modeled on Hermes). Token cache `data/.auth/github.json` (git-ignored, perms 600).
+- [x] **T7.1 — Device-flow auth core.** `app/advisor/auth.py` — device code → poll → `gho_` → exchange `copilot_internal/v2/token` → cache+refresh (modeled on Hermes). Token cache `data/.auth/github.json` (git-ignored, perms 600).
   - *Validate:* `tests/test_auth.py` against mocked GitHub endpoints (no network); cache never in DB/logs.
-- [ ] **T7.2 — `GitHubCopilotProvider` (Route A).** Add the provider kind; `build_provider` selects it; asks `auth` for the bearer.
+- [x] **T7.2 — `GitHubCopilotProvider` (Route A).** Add the provider kind; `build_provider` selects it; asks `auth` for the bearer.
   - *Validate:* test: provider builds + sets Copilot headers (mocked transport).
-- [ ] **T7.3 — `login` CLI.** `app/cli/login.py` runs the device flow, prints the user code.
+- [x] **T7.3 — `login` CLI.** `app/cli/login.py` runs the device flow, prints the user code.
   - *Validate:* manual smoke documented; unit test drives the flow with mocked endpoints.
 - [ ] **T7.4 — Owner identity + allowlist check.** Gateway helper: resolve `(channel, channel_user_id)` → only `paired` admitted; refusals audited + rate-limited (§10.1).
   - *Validate:* `tests/test_allowlist.py` — paired passes, unpaired refused + audited.
@@ -322,7 +323,7 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 2. **Per-job concurrency mechanism — DECIDED (2026-06-15): in-process `asyncio` runner, not a child process.** The work is I/O-bound, the durable truth is already folders + DB, and pause/resume/abandon + `/req` status sharing are far simpler in one address space; `asyncio` `cancel()` also gives clean cooperative abandon that OS threads can't. Isolation is **logical** (own `JobContext` + folder + inbox); a CPU-bound *skill* can be offloaded to a `ProcessPoolExecutor` if ever needed. Spec §6A/§6B updated to match. *(Revisit only if hard fault isolation / force-kill becomes necessary; the recovery contract makes that promotion cheap.)*
 3. **`sqlite-vec` dependency** for vectors (P5.2) — **DECIDED (2026-06-15): pure-Python first, no `sqlite-vec`.** Vectors are stored as float32 blobs in the existing `embeddings` table and searched with deterministic brute-force cosine (`app/memory/vectors.py`), so the suite stays fully offline + hash-pinned with **no new dependency**. The `vector_search` surface is deliberately small so a `sqlite-vec` (ANN) backend can replace the internals later — revisit only when the hot set grows large enough that brute-force latency matters.
 4. **Web frontend scope** (P9.6) — full React/Vite now, or REST + a minimal HTML page until later?
-5. **Test doubles for GitHub/Bing/Telegram** — confirm we mock all external HTTP in unit tests (no live calls in CI). *(Recommend: yes.)*
+5. **Test doubles for GitHub/Bing/Telegram** — confirm we mock all external HTTP in unit tests (no live calls in CI). *(Recommend: yes.)* **Implemented (2026-06-15):** the default `pytest` run is fully offline (a `conftest` guard blocks real sockets); a separate **opt-in** suite marked `integration` (`tests/test_live_integration.py`) calls a **real** model but is **deselected by default** (`addopts = -m 'not integration'`) and **skips** without a configured token — so CI stays offline while `python -m pytest -m integration` exercises a live model on demand.
 6. **Phase ordering** — OK to defer auth/pairing (P7) until after the CLI core (P4–P6), or do you want pairing earlier?
 7. **Cited-URL verification strictness — default ON (2026-06-15).** The deterministic existence check ships **enabled** (`verify_citation_urls: true`), but our fetcher can false-negative on pages guarded by **anti-crawler defenses** (CAPTCHA, JS/bot challenges, paywalls, geofencing) that an AI/browser could open — so it's **disable-able in `config/policies.yaml`**. Planned **hardening (later phase, alongside `web.fetch`):** treat ambiguous/blocked responses as a soft-pass, cross-check existence via the search API, and/or render headless before deciding; revisit whether the default should stay on. *(Open: which hardening lands first, and does the default flip once it's robust?)*
 

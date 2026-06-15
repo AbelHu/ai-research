@@ -18,12 +18,17 @@ class NetworkAccessError(RuntimeError):
 
 
 @pytest.fixture(autouse=True)
-def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Block real socket connections for every test.
 
     Tests that need a provider must use a fake transport / fake provider
-    instead of touching the network.
+    instead of touching the network. The **only** exception is the opt-in
+    ``integration`` suite (marked ``@pytest.mark.integration``), which calls a
+    real model and is excluded from the default run — it is allowed past this
+    guard so live tests can actually reach the network.
     """
+    if request.node.get_closest_marker("integration") is not None:
+        return  # live integration test: real network is permitted
 
     def _blocked(*args: object, **kwargs: object) -> None:
         raise NetworkAccessError(

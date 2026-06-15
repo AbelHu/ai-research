@@ -39,3 +39,18 @@ providers:
   #   kind: ollama
   #   model: llama3.1:8b
   #   base_url: http://localhost:11434
+
+  # --- Route A: GitHub Copilot via device-flow login (no PAT) ---------------
+  # Prefer logging in with your GitHub account instead of minting a PAT? Run
+  # `python -m app.cli.login`, then change the providers above to `kind:
+  # github_copilot` (no api_key_env - the bearer comes from the device-flow
+  # cache). Copilot uses bare model ids (e.g. `gpt-4o`), not `{publisher}/{model}`.
+  # Example replacements for `fast` and `quality`:
+  # fast:
+  #   kind: github_copilot
+  #   model: gpt-4o-mini
+  # quality:
+  #   kind: github_copilot
+  #   model: gpt-4o
+  # NOTE: GitHub Copilot does not expose an embeddings endpoint, so keep the
+  # `embed` role on github_models / openai_compatible for vector search.

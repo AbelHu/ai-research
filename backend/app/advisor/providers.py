@@ -162,6 +162,45 @@ class GitHubModelsProvider(OpenAICompatibleProvider):
         self.org = org
 
 
+class GitHubCopilotProvider(OpenAICompatibleProvider):
+    """GitHub Copilot (Route A): OpenAI-compatible body + a device-flow bearer.
+
+    Unlike the PAT-based providers, the bearer is **fetched per request** from
+    the device-flow auth layer (`GitHubCopilotAuth.get_bearer`), which
+    transparently exchanges/refreshes the short-lived Copilot API token. The raw
+    token never appears in config — it comes from the git-ignored auth cache.
+    """
+
+    def __init__(self, *, auth, model: str, timeout: float = 60.0) -> None:
+        from app.advisor.auth import (
+            COPILOT_API_BASE,
+            COPILOT_INTEGRATION_ID,
+            EDITOR_VERSION,
+            USER_AGENT,
+        )
+
+        super().__init__(
+            base_url=COPILOT_API_BASE,
+            model=model,
+            api_key=None,
+            extra_headers={
+                "Editor-Version": EDITOR_VERSION,
+                "Copilot-Integration-Id": COPILOT_INTEGRATION_ID,
+                "Openai-Intent": "conversation-panel",
+                "User-Agent": USER_AGENT,
+            },
+            timeout=timeout,
+        )
+        self._auth = auth
+
+    def _headers(self) -> dict:
+        # The bearer is dynamic: ask the auth layer (it refreshes as needed) and
+        # reveal it only here, at the HTTP boundary.
+        headers = {"Content-Type": "application/json", **self._extra_headers}
+        headers["Authorization"] = f"Bearer {self._auth.get_bearer()}"
+        return headers
+
+
 def build_provider(provider_cfg, *, getenv=os.getenv) -> AIProvider:
     """Construct a provider from a `ProviderConfig` (see config/settings.py).
 
@@ -175,6 +214,12 @@ def build_provider(provider_cfg, *, getenv=os.getenv) -> AIProvider:
             raise MissingCredentialError(provider_cfg.api_key_env or "GITHUB_MODELS_TOKEN")
         org = getenv(provider_cfg.org_env) if provider_cfg.org_env else None
         return GitHubModelsProvider(token=Secret(token), model=provider_cfg.model, org=org or None)
+
+    if kind == "github_copilot":
+        # Route A: no api_key_env — the bearer comes from the device-flow cache.
+        from app.advisor.auth import GitHubCopilotAuth
+
+        return GitHubCopilotProvider(auth=GitHubCopilotAuth(), model=provider_cfg.model)
 
     if kind == "openai_compatible":
         if not provider_cfg.base_url:

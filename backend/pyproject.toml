@@ -23,7 +23,12 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# Deselect live integration tests by default so the standard `pytest` run stays
+# fully offline. Run them explicitly with: `python -m pytest -m integration`.
+addopts = "-q -m 'not integration'"
+markers = [
+    "integration: opt-in tests that call a REAL AI model over the network (need a configured token; excluded from the default run)",
+]
 
 [tool.ruff]
 line-length = 100
