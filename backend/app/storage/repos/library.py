@@ -63,6 +63,21 @@ def get_final_report_for_request(conn: sqlite3.Connection, request_id: int) -> s
     ).fetchone()
 
 
+def set_final_report_confirmation(
+    conn: sqlite3.Connection,
+    final_report_id: int,
+    *,
+    user_confirmed: bool,
+    spawned_request_id: int | None = None,
+) -> None:
+    """Record the user's confirmation + any spawned improvement request (§6B)."""
+    with conn:
+        conn.execute(
+            "UPDATE final_reports SET user_confirmed = ?, spawned_request_id = ? WHERE id = ?",
+            (1 if user_confirmed else 0, spawned_request_id, final_report_id),
+        )
+
+
 def create_library_index_entry(
     conn: sqlite3.Connection,
     *,

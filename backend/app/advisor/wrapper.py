@@ -38,7 +38,7 @@ from pydantic import BaseModel, ValidationError
 from app.advisor.citations import UrlVerifier, http_url_exists, unresolved_citation_urls
 from app.advisor.providers import AIProvider, CompletionRequest, CompletionResponse
 from app.advisor.redaction import redact_text
-from app.advisor.schemas import Analysis, AnswerDraft, Triage
+from app.advisor.schemas import Analysis, AnswerDraft, PlanSpec, ProposedAction, Triage, Verdict
 from app.advisor.templates import Template, load_template
 from app.config.policies import get_policies
 from app.storage.repos import ai_calls as ai_calls_repo
@@ -206,6 +206,79 @@ class Advisor:
                 confidence=0.0,
                 rationale="fallback: analysis output could not be validated",
                 clarify=["Could you clarify what you'd like me to do?"],
+            ),
+        )
+
+    def make_plan(
+        self,
+        *,
+        goal: str,
+        request_id: int,
+        job_id: int | None = None,
+    ) -> PlanSpec:
+        """Draft a complex job's plan (template ``analyzer.plan``, §6B / T6.1).
+
+        No deterministic fallback: a malformed plan **escalates** rather than
+        running unvalidated phases/tasks (AI never drives the control path).
+        """
+        return self._run(
+            role="planner",
+            template_name="analyzer.plan",
+            variables={"goal": goal},
+            schema=PlanSpec,
+            request_id=request_id,
+            job_id=job_id,
+            fallback=None,
+        )
+
+    def next_action(
+        self,
+        *,
+        goal: str,
+        catalog: str = "",
+        progress: str = "",
+        request_id: int,
+        job_id: int | None = None,
+    ) -> ProposedAction:
+        """Propose the next skill call for a task (template ``worker.next_action``).
+
+        No deterministic fallback: an unvalidatable proposal **escalates** rather
+        than running an action the runtime can't trust (§8.4).
+        """
+        return self._run(
+            role="planner",
+            template_name="worker.next_action",
+            variables={"goal": goal, "catalog": catalog, "progress": progress},
+            schema=ProposedAction,
+            request_id=request_id,
+            job_id=job_id,
+            fallback=None,
+        )
+
+    def review(
+        self,
+        *,
+        subject: str,
+        context: str = "",
+        request_id: int,
+        job_id: int | None = None,
+    ) -> Verdict:
+        """Company Expert sign-off (template ``expert.review``, §6B / T6.3).
+
+        Falls back to a deterministic **decline** with a note if the model
+        output can't be validated — never auto-approves on a parse failure
+        (failing safe keeps unvalidated work from being signed off).
+        """
+        return self._run(
+            role="planner",
+            template_name="expert.review",
+            variables={"subject": subject, "context": context},
+            schema=Verdict,
+            request_id=request_id,
+            job_id=job_id,
+            fallback=lambda: Verdict(
+                decision="decline",
+                comments=["fallback: review output could not be validated"],
             ),
         )
 

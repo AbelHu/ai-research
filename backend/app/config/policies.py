@@ -75,6 +75,10 @@ class Policies(BaseModel):
     # JS/bot challenges, paywalls) that an AI/browser could pass — a first cut to
     # be hardened later, not a permanent limitation.
     verify_citation_urls: bool = True
+    # Require user confirmation before activating a feature job's generated
+    # code/skills (design-spec §5/§6B). Default on: generated code stays inert
+    # until explicitly confirmed; deactivating this would auto-activate (unsafe).
+    confirm_generated_code: bool = True
     # Deterministic memory weighting / TTL knobs (§9.1).
     memory: MemoryPolicy = Field(default_factory=MemoryPolicy)
 

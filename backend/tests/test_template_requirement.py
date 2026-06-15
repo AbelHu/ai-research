@@ -18,6 +18,9 @@ from app.advisor.templates import load_template
 CASES = [
     ("triage.classify", schemas.Triage),
     ("analyzer.analyze", schemas.Analysis),
+    ("analyzer.plan", schemas.PlanSpec),
+    ("expert.review", schemas.Verdict),
+    ("worker.next_action", schemas.ProposedAction),
     ("junior.answer", schemas.AnswerDraft),
 ]
 

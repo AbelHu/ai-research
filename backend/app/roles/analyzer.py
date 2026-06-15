@@ -107,3 +107,20 @@ def analyze(
         template="analyzer.analyze@v1",
     )
     return AnalyzerResult(analysis=analysis, verdict=verdict, job_id=job_id, envelope=envelope)
+
+
+def draft_plan(conn, advisor: Advisor, card: dict, *, job_id: int):
+    """Draft + persist a complex job's plan (§6B; implementation-plan T6.1).
+
+    Calls the advisor for a validated `PlanSpec`, then persists it as a ``New``
+    plan → phases → tasks tree (status transitions come later via sign-off).
+    Returns the stored `Plan`.
+    """
+    from app.storage.repos import plans as plans_repo
+
+    spec = advisor.make_plan(
+        goal=card["text"],
+        request_id=card["request_id"],
+        job_id=job_id,
+    )
+    return plans_repo.create_plan_from_spec(conn, job_id=job_id, spec=spec)

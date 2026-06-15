@@ -228,25 +228,25 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 > Goal: a **task** job runs a plan with phases, sign-off, and a final report — **and a feature job** additionally emits gated generated code/skills (§5). Concurrency capped at `max_concurrent_jobs`.
 
-- [ ] **T6.1 — Analyzer plan drafting.** Produce a validated `PlanDraft` (phases→tasks, deps) via the advisor.
+- [x] **T6.1 — Analyzer plan drafting.** Produce a validated `PlanDraft` (phases→tasks, deps) via the advisor.
   - *Validate:* test: complex request → schema-valid plan.
-- [ ] **T6.2 — Status state machine.** `app/roles/lifecycle.py` — New→Approved→Active→InProgress→Resolved→Closed (+Abandoned) per entity; who-sets-what enforced.
+- [x] **T6.2 — Status state machine.** `app/roles/lifecycle.py` — New→Approved→Active→InProgress→Resolved→Closed (+Abandoned) per entity; who-sets-what enforced.
   - *Validate:* `tests/test_lifecycle.py` — legal transitions pass, illegal rejected.
-- [ ] **T6.3 — Company Expert sign-off.** Approve/decline plans + phases (decline ≤`max_phase_declines`, then escalate).
+- [x] **T6.3 — Company Expert sign-off.** Approve/decline plans + phases (decline ≤`max_phase_declines`, then escalate).
   - *Validate:* test: decline path loops then escalates at the cap.
-- [ ] **T6.4 — Boss scheduling + per-job runner.** Start a per-job runner as an **`asyncio` task** (decided — Open decision #2) grouping the execution roles; the Boss starts it on approval and **disposes** it after archive; enforce the `max_concurrent_jobs` cap, queue extras. Logical isolation only (own `JobContext` + folder + inbox); **no separate OS process**.
+- [x] **T6.4 — Boss scheduling + per-job runner.** Start a per-job runner as an **`asyncio` task** (decided — Open decision #2) grouping the execution roles; the Boss starts it on approval and **disposes** it after archive; enforce the `max_concurrent_jobs` cap, queue extras. Logical isolation only (own `JobContext` + folder + inbox); **no separate OS process**.
   - *Validate:* test: 4 complex jobs → 3 run, 1 queued.
-- [ ] **T6.5 — Senior Worker task execution.** Run tasks (respect deps, serial/parallel) through the skill runtime; warm-session checkpoint to folder+DB.
+- [x] **T6.5 — Senior Worker task execution.** Run tasks (respect deps, serial/parallel) through the skill runtime; warm-session checkpoint to folder+DB.
   - *Validate:* test: dependent tasks run in order; results recorded.
-- [ ] **T6.6 — Plan Expert phase/final reports.** Phase resolution + assemble final report; submit to Company Expert.
+- [x] **T6.6 — Plan Expert phase/final reports.** Phase resolution + assemble final report; submit to Company Expert.
   - *Validate:* test: all tasks resolved → phase Resolved → report.
-- [ ] **T6.7 — Pause/resume/abandon.** **Pause:** `jobs.paused` (DB) is the durable truth + a per-job `asyncio.Event` is the live signal; the Boss stops scheduling and the runner checkpoints + parks at the next step boundary (no flag file). Pause holds the slot (named tradeoff, §6B); resume re-evaluates the plan. **Abandon:** `task.cancel()` → `CancelledError`; a `try/finally` marks plan/phases/tasks `Abandoned` and frees the slot.
+- [x] **T6.7 — Pause/resume/abandon.** **Pause:** `jobs.paused` (DB) is the durable truth + a per-job `asyncio.Event` is the live signal; the Boss stops scheduling and the runner checkpoints + parks at the next step boundary (no flag file). Pause holds the slot (named tradeoff, §6B); resume re-evaluates the plan. **Abandon:** `task.cancel()` → `CancelledError`; a `try/finally` marks plan/phases/tasks `Abandoned` and frees the slot.
   - *Validate:* test: pause checkpoints + holds slot + parks on the event; resume continues; abandon cancels, marks `Abandoned`, frees the slot.
-- [ ] **T6.8 — Improvement loop.** On finish: **archive+close original on both branches**, then optionally spawn a linked improvement request (`improves_request_id`), capped by `max_improvement_iterations`.
+- [x] **T6.8 — Improvement loop.** On finish: **archive+close original on both branches**, then optionally spawn a linked improvement request (`improves_request_id`), capped by `max_improvement_iterations`.
   - *Validate:* test: confirm-improvement spawns a linked request *after* the original is Closed; decline just closes.
-- [ ] **T6.9 — Feature-job deliverable: inert generated code/skills.** A **feature** job writes proposed skills/code into `backend/app/skills/generated/<job>/`, **inert** — not registered or executed — until confirmed (§5, §6B).
+- [x] **T6.9 — Feature-job deliverable: inert generated code/skills.** A **feature** job writes proposed skills/code into `backend/app/skills/generated/<job>/`, **inert** — not registered or executed — until confirmed (§5, §6B).
   - *Validate:* `tests/test_generated_inert.py` — a feature plan writes generated code; it is **absent from the live catalog** and never executed.
-- [ ] **T6.10 — Generated-code review → confirm → activate.** Plan Expert review + user confirmation (`confirm_generated_code: true`) flips a generated skill to **active/registered**; a decline leaves it inert.
+- [x] **T6.10 — Generated-code review → confirm → activate.** Plan Expert review + user confirmation (`confirm_generated_code: true`) flips a generated skill to **active/registered**; a decline leaves it inert.
   - *Validate:* test: confirm → skill now in catalog + runnable through the runtime; decline → stays inert.
 - ✅ **Checkpoint P6** — task **and** feature jobs run with sign-off, concurrency, recovery; generated code is gated.
 

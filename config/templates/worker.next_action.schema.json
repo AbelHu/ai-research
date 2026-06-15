@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "title": "ProposedAction",
+  "properties": {
+    "skill": { "type": "string", "minLength": 1 },
+    "params": { "type": "object" },
+    "rationale": { "type": "string" },
+    "done": { "type": "boolean" }
+  },
+  "required": ["skill"],
+  "additionalProperties": false
+}

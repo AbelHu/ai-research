@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "title": "Verdict",
+  "properties": {
+    "decision": { "type": "string", "enum": ["approve", "decline"] },
+    "comments": { "type": "array", "items": { "type": "string" } },
+    "characters": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "value": { "type": "string", "minLength": 1 },
+          "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
+        },
+        "required": ["key", "value"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["decision"],
+  "additionalProperties": false
+}

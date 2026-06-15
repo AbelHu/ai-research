@@ -135,6 +135,17 @@ def get_request_by_code(conn: sqlite3.Connection, code: str) -> Request | None:
     return Request.from_row(row) if row else None
 
 
+def set_request_state(conn: sqlite3.Connection, request_id: int, state: str) -> Request:
+    """Set a request's lifecycle state (active | archived | dropped) (§9.1)."""
+    if state not in {"active", "archived", "dropped"}:
+        raise ValueError(f"invalid request state: {state!r}")
+    with conn:
+        conn.execute("UPDATE requests SET state = ? WHERE id = ?", (state, request_id))
+    updated = get_request(conn, request_id)
+    assert updated is not None
+    return updated
+
+
 def list_requests(
     conn: sqlite3.Connection,
     *,
@@ -183,6 +194,29 @@ def get_job_for_request(conn: sqlite3.Connection, request_id: int) -> Job | None
         "SELECT * FROM jobs WHERE request_id = ? ORDER BY id LIMIT 1", (request_id,)
     ).fetchone()
     return Job.from_row(row) if row else None
+
+
+def set_job_paused(conn: sqlite3.Connection, job_id: int, paused: bool) -> Job:
+    """Set/clear a job's durable ``paused`` flag (design-spec §6B; plan T6.7).
+
+    ``jobs.paused`` is the durable source of truth that suspends the whole job;
+    a per-job ``asyncio.Event`` (see `app.roles.jobcontrol`) is the live signal.
+    Returns the updated job.
+    """
+    with conn:
+        if paused:
+            conn.execute(
+                "UPDATE jobs SET paused = 1, paused_at = datetime('now') WHERE id = ?",
+                (job_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE jobs SET paused = 0, paused_at = NULL WHERE id = ?",
+                (job_id,),
+            )
+    updated = get_job(conn, job_id)
+    assert updated is not None
+    return updated
 
 
 def add_request_detail(

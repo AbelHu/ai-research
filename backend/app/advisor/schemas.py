@@ -48,6 +48,37 @@ class PlanDraft(_Strict):
     phases: list[str] = Field(default_factory=list)
 
 
+class TaskSpec(_Strict):
+    """One task in a drafted plan (template `analyzer.plan`, §6B).
+
+    ``depends_on`` holds the 0-based indices of **earlier sibling tasks in the
+    same phase** that must be ``Resolved`` first; ``run_mode`` lets independent
+    tasks run in parallel. Validated against the phase on persistence.
+    """
+
+    title: str = Field(..., min_length=1)
+    depends_on: list[int] = Field(default_factory=list)
+    run_mode: Literal["serial", "parallel"] = "serial"
+
+
+class PhaseSpec(_Strict):
+    """One phase in a drafted plan: an ordered list of tasks (§6B)."""
+
+    title: str = Field(..., min_length=1)
+    tasks: list[TaskSpec] = Field(default_factory=list)
+
+
+class PlanSpec(_Strict):
+    """The Analyzer's full drafted plan — phases → tasks (+ deps) (§6B, T6.1).
+
+    The richer drafting contract behind a complex job, distinct from the
+    lightweight `PlanDraft` hint carried inline on `Analysis`. Requires at least
+    one phase; code validates dependency indices when it persists the plan.
+    """
+
+    phases: list[PhaseSpec] = Field(..., min_length=1)
+
+
 class Analysis(_Strict):
     """Analyzer's authoritative verdict (template `analyzer.analyze`, §6D)."""
 
@@ -80,3 +111,38 @@ class AnswerDraft(_Strict):
     answer: str = Field(..., min_length=1)
     citations: list[Source] = Field(..., min_length=1)
     confidence: float = Field(ge=0.0, le=1.0)
+
+
+class Trait(_Strict):
+    """A user 'character' extracted during review (habit/liking/location…) — §6D."""
+
+    key: str = Field(..., min_length=1)
+    value: str = Field(..., min_length=1)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class Verdict(_Strict):
+    """A Company Expert sign-off verdict (template `expert.review`, §6D).
+
+    ``decision`` drives the deterministic next verb (approve/decline); code, not
+    the model, applies the status change and bounds the decline loop (§6B).
+    """
+
+    decision: Literal["approve", "decline"]
+    comments: list[str] = Field(default_factory=list)
+    characters: list[Trait] | None = None
+
+
+class ProposedAction(_Strict):
+    """A Senior Worker's proposed next skill call (template `worker.next_action`).
+
+    The advisor never runs a skill — it returns this **validated proposal** that
+    deterministic code re-validates against the catalog + policy gate before the
+    skill runtime executes it (§8.4). ``done`` lets the worker signal the task is
+    complete instead of proposing another action.
+    """
+
+    skill: str = Field(..., min_length=1)
+    params: dict = Field(default_factory=dict)
+    rationale: str = ""
+    done: bool = False
