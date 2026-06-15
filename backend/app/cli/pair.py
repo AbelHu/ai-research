@@ -1,21 +1,24 @@
-"""Pair a chat account to the owner (design-spec §10.1; implementation-plan T7.5).
+"""Pair a chat account to the owner (design-spec §10.1; implementation-plan T7.5/T8.7).
 
 Run from the ``backend/`` directory:
 
     python -m app.cli.pair                       # mint a one-time host code
-    python -m app.cli.pair --list                # show active codes + paired accounts
+    python -m app.cli.pair --list                # pending requests + codes + paired accounts
+    python -m app.cli.pair --approve ABCD-1234   # approve a user's pending request
     python -m app.cli.pair --revoke telegram:42  # revoke a paired account
     python -m app.cli.pair --challenge --channel telegram --user 42
                                                  # device-flow owner challenge → bind
 
-Two ways to bind a chat account to the **owner** (§10.1):
+Ways to bind a chat account to the **owner** (§10.1):
 
-* **Host code (default).** Mint a short, single-use code here on the host
-  (possessing it proves ownership); send ``/pair <code>`` from the chat account
-  to bind it (the chat side lands in P8). Only a hash of the code is stored.
+* **Request-and-approve (recommended).** The user messages the bot; the bot
+  replies a **pairing code**. The operator runs ``--list`` to see pending
+  requests and ``--approve <code>`` to bind that account — approval happens on
+  the trusted console, so the model/user never self-authorizes.
+* **Host code.** Mint a short, single-use code here (``--mint``); send
+  ``/pair <code>`` from the chat account to bind it. Only a hash is stored.
 * **Device-flow challenge.** Approve the GitHub device flow **as the owner**;
-  the bot reads your ``login``, binds the given ``(channel, user)``, and discards
-  the token. The first host-run challenge also establishes the owner login.
+  the bot reads your ``login`` and binds the given ``(channel, user)``.
 
 Pairing and the allowlist are **deterministic** — the model is never consulted.
 """
@@ -36,6 +39,7 @@ from app.storage.db import connect
 from app.storage.migrations import migrate
 from app.storage.repos import identities as identities_repo
 from app.storage.repos import pairing_codes as pairing_codes_repo
+from app.storage.repos import pairing_requests as pairing_requests_repo
 
 DEFAULT_DB_NAME = "app.db"
 
@@ -50,12 +54,21 @@ def run_mint(conn, *, ttl_seconds: int = pairing_codes_repo.DEFAULT_TTL_SECONDS)
 
 
 def run_list(conn) -> int:
-    """List active (unused, unexpired) codes + currently paired accounts."""
+    """List pending pairing requests + active host codes + paired accounts."""
+    pending = pairing_requests_repo.list_pending(conn)
+    print(f"[info] Pending pairing requests: {len(pending)}")
+    for req in pending:
+        print(
+            f"         {req.code}  {req.channel}:{req.channel_user_id}"
+            f"  requested {req.created_at} UTC"
+        )
+    if pending:
+        print("       Approve one with:  python -m app.cli.pair --approve <code>")
+
     active = pairing_codes_repo.list_active(conn)
-    print(f"[info] Active pairing codes: {len(active)}")
+    print(f"[info] Active host codes: {len(active)}")
     for code in active:
-        used = "available"
-        print(f"         #{code.id}  expires {code.expires_at} UTC  ({used})")
+        print(f"         #{code.id}  expires {code.expires_at} UTC  (available)")
 
     paired = identities_repo.list_identities(conn, state="paired")
     print(f"[info] Paired accounts: {len(paired)}")
@@ -65,6 +78,17 @@ def run_list(conn) -> int:
             f"  via {identity.paired_via}  at {identity.paired_at}"
         )
     return 0
+
+
+def run_approve(conn, code: str) -> int:
+    """Approve a user's pending pairing request (binds the requesting account)."""
+    result = pairing.approve_pairing_request(conn, code)
+    if result.paired:
+        ident = result.identity
+        print(f"[done] Approved — {ident.channel}:{ident.channel_user_id} can now chat.")
+        return 0
+    print(f"[fail] No pending request for code {code!r} (unknown, already used, or expired).")
+    return 1
 
 
 def run_revoke(conn, target: str) -> int:
@@ -138,7 +162,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--mint", action="store_true", help="mint a one-time host code (default)")
-    group.add_argument("--list", action="store_true", help="list active codes + paired accounts")
+    group.add_argument(
+        "--list", action="store_true", help="list pending requests + codes + paired accounts"
+    )
+    group.add_argument(
+        "--approve", metavar="CODE", help="approve a user's pending pairing request by code"
+    )
     group.add_argument("--revoke", metavar="CHANNEL:USER", help="revoke a paired account")
     group.add_argument(
         "--challenge", action="store_true", help="run the device-flow owner challenge"
@@ -157,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
         migrate(conn)
         if args.list:
             return run_list(conn)
+        if args.approve:
+            return run_approve(conn, args.approve)
         if args.revoke:
             return run_revoke(conn, args.revoke)
         if args.challenge:

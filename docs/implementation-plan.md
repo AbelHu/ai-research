@@ -284,8 +284,31 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
   - *Validate:* test: fake inbound from a paired user → answer enqueued; unpaired → refused.
 - [x] **T8.4 — `pair` over chat (`/pair <code>` + unpaired hint).** The chat side of host-code pairing: `/pair <code>` binds the sender to the owner; an unpaired non-`/pair` sender gets a single "pair first" hint (rate-limited, audited).
   - *Validate:* `tests/test_ingress.py` — `/pair <valid>` binds + confirms; unpaired sender refused with a hint, no request created.
-  - *Deferred follow-up:* surfacing a **device-flow** `user_code` in chat with background owner-verify + bind (needs a per-chat pending-challenge poller); the host one-time code path already makes Telegram pairing fully testable.
 - ✅ **Checkpoint P8** — Telegram round-trip works for the owner only.
+
+### P8.5 — Chat-app onboarding: connect the bot + request-and-approve pairing — *planned, needs decisions (open #8)*
+
+> Two **separate** concerns (don't conflate them):
+>
+> **A. Connect the bot to the chat service** *(operator-only, once).* How this works is **platform-specific**:
+> - **Bot-token platforms (Telegram, Discord, Slack, Teams):** register a bot with the platform (Telegram **@BotFather**) → paste the **token**. There is **no QR** here — the bot is a first-class app identity. *(This is what's built today, T8.2/T9.4.)*
+> - **Linked-device platforms (WhatsApp; also a Telegram *user* account via MTProto):** the **chat service issues a QR** through its session/protocol; we **render that QR in the console** and the owner scans it with their phone app's "linked devices" to approve. The QR content comes **from the chat service**, not from us — we only render + display it. *(Needs a per-platform session library; out of scope until we target such a platform — see open #8.)*
+>
+> **B. Pair a user (request-and-approve).** Once the bot is connected, authorizing *who* may chat is **user-initiated, host-approved** (the operator approves on the trusted console — the model never decides):
+> 1. An **unpaired** user messages the bot.
+> 2. The bot creates a **pending pairing request** for that `(channel, channel_user_id)` and **replies with a short pairing code** (e.g. `ABCD-1234`), telling the user to ask the operator to approve it.
+> 3. The operator runs **`python -m app.cli.pair --list`** to see pending requests (code + channel + user), then **`--approve <code>`** to bind that account to the owner.
+> 4. The bot **confirms** to the user on their next message (or proactively). Refusals before approval stay rate-limited + audited (§10.1).
+>
+> *Reference note:* the GitHub **device-flow** auth (§7.2) is the part modeled on OpenClaw/Hermes; the chat **pairing** flow above is a standard request-and-approve pattern (not something those repos implement — they're coding CLIs, not chat bots).
+
+- [x] **T8.5 — Pending pairing requests (schema + repo).** A `pairing_requests` row per unpaired `(channel, channel_user_id)`: a short code, `pending|approved|expired`, TTL, created_at. Repo: `create_or_refresh(channel, user) -> request`, `get_request`, `list_pending`, `approve(code)`, `expire_stale`. One pending row per account (a repeat message reuses the code); the code is a **claim ticket** (stored plaintext — possession grants nothing without console approval).
+  - *Validate:* `tests/test_pairing_requests.py` — first unpaired message creates a request + code; repeat reuses the same pending code; approve marks approved; expired/used/unknown codes rejected.
+- [x] **T8.6 — Ingress: reply-with-code for unpaired senders.** An unpaired sender gets a **pairing code** (created via T8.5) in the reply — "Your pairing code is `ABCD-1234`. Ask the operator to run `pair --approve ABCD-1234`." Still **no request/job created**, rate-limited + audited; a repeat reuses the same code (no spam). A `/pair <code>` typed in chat remains supported (host-minted codes).
+  - *Validate:* `tests/test_ingress.py` — an unpaired sender's reply contains a fresh code + a pending request exists; a second message reuses the same code; after `approve_pairing_request` the sender is admitted and answered.
+- [x] **T8.7 — `pair --list` / `--approve` (console approval).** `app/cli/pair.py`: `--list` shows pending requests (code, channel, user, age) alongside active host codes + paired accounts; `--approve <code>` binds the requesting account to the owner. Keeps `--revoke`/`--mint`/`--challenge`.
+  - *Validate:* `tests/test_pair_cli.py` — a seeded pending request is listed; `--approve <code>` flips it to paired (allowlist now admits it); an unknown code is rejected.
+- *(On hold — concern **A** QR-connect: `app/channels/qr.py` console QR renderer for linked-device platforms (WhatsApp etc.). Not needed for Telegram (token-based); revisit if such a platform is targeted — open #8.)*
 
 ---
 
@@ -352,6 +375,7 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 5. **Test doubles for GitHub/Bing/Telegram** — confirm we mock all external HTTP in unit tests (no live calls in CI). *(Recommend: yes.)* **Implemented (2026-06-15):** the default `pytest` run is fully offline (a `conftest` guard blocks real sockets); a separate **opt-in** suite marked `integration` (`tests/test_live_integration.py`) calls a **real** model but is **deselected by default** (`addopts = -m 'not integration'`) and **skips** without a configured token — so CI stays offline while `python -m pytest -m integration` exercises a live model on demand.
 6. **Phase ordering** — OK to defer auth/pairing (P7) until after the CLI core (P4–P6), or do you want pairing earlier?
 7. **Cited-URL verification strictness — default ON (2026-06-15).** The deterministic existence check ships **enabled** (`verify_citation_urls: true`), but our fetcher can false-negative on pages guarded by **anti-crawler defenses** (CAPTCHA, JS/bot challenges, paywalls, geofencing) that an AI/browser could open — so it's **disable-able in `config/policies.yaml`**. Planned **hardening (later phase, alongside `web.fetch`):** treat ambiguous/blocked responses as a soft-pass, cross-check existence via the search API, and/or render headless before deciding; revisit whether the default should stay on. *(Open: which hardening lands first, and does the default flip once it's robust?)*
+8. **Chat-app onboarding model (P8.5).** Two parts. **(a) Connecting the bot** is platform-specific: **Telegram/Discord/Slack** = a **bot token** (no QR); **WhatsApp / Telegram-user-account** = the **chat service issues a QR** we render in console + scan with the phone app (needs a per-platform session library). *(Decide: stay bot-token Telegram-first, or target a linked-device platform like WhatsApp where the scan-to-connect QR applies?)* **(b) Pairing a user** = **request-and-approve**: unpaired user messages the bot → bot replies a **pairing code** → operator runs `pair --approve <code>` on the console. *(Recommend: build (b) now — platform-agnostic; defer (a)'s QR + session library until/if a linked-device platform is chosen, since Telegram bots have no scan-to-connect.)* A console QR renderer (`segno`, pure-Python, hash-pinned) is only needed once (a) targets such a platform.
 
 ---
 

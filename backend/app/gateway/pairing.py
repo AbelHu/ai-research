@@ -27,12 +27,14 @@ from app.config.settings import Settings
 from app.storage.repos import audit as audit_repo
 from app.storage.repos import identities as identities_repo
 from app.storage.repos import pairing_codes as pairing_codes_repo
+from app.storage.repos import pairing_requests as pairing_requests_repo
 from app.storage.repos.identities import UserIdentity
 
 # audit_log actions (stable strings for forensics/querying).
 PAIRED_ACTION = "pairing.paired"
 REFUSED_NOT_OWNER_ACTION = "pairing.refused_not_owner"
 BAD_CODE_ACTION = "pairing.bad_code"
+REQUESTED_ACTION = "pairing.requested"
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,63 @@ def pair_with_host_code(
     )
     audit_repo.record_audit(
         conn, actor="system", action=PAIRED_ACTION, target=target, payload={"via": "host_code"}
+    )
+    return PairResult(paired=True, reason="paired", identity=identity)
+
+
+def request_pairing(
+    conn: sqlite3.Connection,
+    *,
+    channel: str,
+    channel_user_id: str,
+    now: datetime | None = None,
+) -> str:
+    """Record a pending pairing request for an unpaired sender; return its code.
+
+    The **user-initiated** half of request-and-approve (§10.1): the bot calls
+    this when an unpaired account messages it, then replies the code for the
+    operator to approve. Reuses an existing pending code (no spam).
+    """
+    request = pairing_requests_repo.create_or_refresh(conn, channel, channel_user_id, now=now)
+    audit_repo.record_audit(
+        conn,
+        actor="system",
+        action=REQUESTED_ACTION,
+        target=request.target,
+    )
+    return request.code
+
+
+def approve_pairing_request(
+    conn: sqlite3.Connection, code: str, *, now: datetime | None = None
+) -> PairResult:
+    """Approve a pending request (operator on console) → bind the account (§10.1).
+
+    The **host-approved** half: the operator runs ``pair --approve <code>``. On a
+    valid pending code the requesting account is bound to the owner (same trust
+    basis as a host code — the operator authorized it on the trusted console).
+    """
+    request = pairing_requests_repo.approve(conn, code, now=now)
+    if request is None:
+        audit_repo.record_audit(
+            conn, actor="user", action=BAD_CODE_ACTION, target=f"request:{code}"
+        )
+        return PairResult(paired=False, reason="bad_code")
+
+    owner_id = identities_repo.ensure_owner(conn)
+    identity = identities_repo.bind_identity(
+        conn,
+        user_id=owner_id,
+        channel=request.channel,
+        channel_user_id=request.channel_user_id,
+        paired_via="host_code",
+    )
+    audit_repo.record_audit(
+        conn,
+        actor="system",
+        action=PAIRED_ACTION,
+        target=request.target,
+        payload={"via": "request_approval"},
     )
     return PairResult(paired=True, reason="paired", identity=identity)
 

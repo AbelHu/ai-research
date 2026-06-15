@@ -20,6 +20,7 @@ from app.config.settings import Settings
 from app.storage.db import connect
 from app.storage.migrations import migrate
 from app.storage.repos import identities as identities_repo
+from app.storage.repos import pairing_requests as pairing_requests_repo
 
 
 @pytest.fixture
@@ -78,7 +79,43 @@ def test_list_shows_active_codes(db_path, capsys) -> None:
     rc = main(["--db", str(db_path), "--list"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Active pairing codes: 1" in out
+    assert "Active host codes: 1" in out
+
+
+def test_list_shows_pending_requests(db_path, capsys) -> None:
+    conn = connect(db_path)
+    migrate(conn)
+    req = pairing_requests_repo.create_or_refresh(conn, "telegram", "77")
+    conn.close()
+
+    rc = main(["--db", str(db_path), "--list"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Pending pairing requests: 1" in out
+    assert req.code in out
+    assert "telegram:77" in out
+
+
+def test_approve_binds_requesting_account(db_path, capsys) -> None:
+    conn = connect(db_path)
+    migrate(conn)
+    req = pairing_requests_repo.create_or_refresh(conn, "telegram", "77")
+    conn.close()
+
+    rc = main(["--db", str(db_path), "--approve", req.code])
+    assert rc == 0
+    assert "can now chat" in capsys.readouterr().out
+
+    conn = connect(db_path)
+    try:
+        identity = identities_repo.get_identity(conn, "telegram", "77")
+    finally:
+        conn.close()
+    assert identity is not None and identity.is_paired
+
+
+def test_approve_unknown_code_returns_nonzero(db_path) -> None:
+    assert main(["--db", str(db_path), "--approve", "ZZZZ-ZZZZ"]) == 1
 
 
 def test_revoke_paired_account(db_path, capsys) -> None:

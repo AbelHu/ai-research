@@ -25,7 +25,7 @@ from app.advisor.wrapper import Advisor
 from app.channels.adapter import InboundMessage, OutboundMessage
 from app.config.policies import Policies, get_policies
 from app.gateway.allowlist import RefusalRateLimiter, check_inbound
-from app.gateway.pairing import pair_with_host_code
+from app.gateway.pairing import pair_with_host_code, request_pairing
 from app.roles.control import AskOutcome, run_ask
 
 # Reply copy (kept deterministic + free of internal ids/secrets).
@@ -36,6 +36,15 @@ PAIR_HINT = (
 PAIR_OK = "Paired — you can chat now."
 PAIR_BAD_CODE = "That pairing code is invalid or expired. Ask the operator for a fresh one."
 PAIR_USAGE = "Usage: /pair <code>"
+
+
+def _pair_request_message(code: str) -> str:
+    """The reply an unpaired sender gets: their claim code + how to get approved."""
+    return (
+        "You're not paired with this assistant yet.\n"
+        f"Your pairing code is: {code}\n"
+        f"Ask the operator to approve it by running:  pair --approve {code}"
+    )
 
 
 @dataclass(frozen=True)
@@ -128,6 +137,15 @@ def handle_inbound(
         rate_limiter=rate_limiter,
     )
     if not decision.admitted:
+        # An unpaired sender gets a request-and-approve **pairing code** to hand
+        # to the operator (still no request/job; rate-limited + audited upstream).
+        # A revoked sender is just refused (no fresh code). Once the limiter trips,
+        # `should_reply` is false → we stay silent (no code spam).
+        if decision.should_reply and decision.reason == "unpaired":
+            code = request_pairing(
+                conn, channel=inbound.channel, channel_user_id=inbound.channel_user_id
+            )
+            return IngressResult("refused", _reply(inbound, _pair_request_message(code)))
         reply = _reply(inbound, PAIR_HINT) if decision.should_reply else None
         return IngressResult("refused", reply)
 

@@ -17,7 +17,6 @@ from app.config.policies import Policies
 from app.gateway.allowlist import REFUSED_ACTION, RefusalRateLimiter
 from app.gateway.ingress import (
     PAIR_BAD_CODE,
-    PAIR_HINT,
     PAIR_OK,
     handle_inbound,
     parse_pair_command,
@@ -27,6 +26,7 @@ from app.storage.migrations import migrate
 from app.storage.repos import audit as audit_repo
 from app.storage.repos import identities as identities_repo
 from app.storage.repos import pairing_codes as pairing_codes_repo
+from app.storage.repos import pairing_requests as pairing_requests_repo
 from tests.fakes import FakeProvider
 
 ANALYSIS_ASK = json.dumps(
@@ -110,15 +110,43 @@ def test_pair_with_bad_code_is_refused(conn) -> None:
 # --- allowlist refusal (T8.3) -----------------------------------------------
 
 
-def test_unpaired_sender_is_refused_with_hint(conn) -> None:
+def test_unpaired_sender_gets_a_pairing_code(conn) -> None:
     result = handle_inbound(
         conn, _inbound("what is 2+2?"), advisor=_advisor(conn), policy=Policies()
     )
     assert result.action == "refused"
-    assert result.reply is not None and result.reply.text == PAIR_HINT
-    # No request was created for an unpaired sender, and the refusal is audited.
+    # The reply carries a fresh request-and-approve code + the operator command.
+    assert result.reply is not None
+    pending = pairing_requests_repo.list_pending(conn)
+    assert len(pending) == 1
+    assert pending[0].code in result.reply.text
+    assert "pair --approve" in result.reply.text
+    # Still no request/job created for an unpaired sender; refusal is audited.
     assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
     assert len(audit_repo.list_audit(conn, action=REFUSED_ACTION)) == 1
+
+
+def test_unpaired_repeat_reuses_same_code(conn) -> None:
+    first = handle_inbound(conn, _inbound("hi"), advisor=_advisor(conn), policy=Policies())
+    second = handle_inbound(conn, _inbound("hi again"), advisor=_advisor(conn), policy=Policies())
+    code = pairing_requests_repo.list_pending(conn)[0].code
+    assert code in first.reply.text and code in second.reply.text  # no code spam
+    assert len(pairing_requests_repo.list_pending(conn)) == 1
+
+
+def test_request_then_approve_admits_sender(conn) -> None:
+    from app.gateway.pairing import approve_pairing_request
+
+    handle_inbound(conn, _inbound("hello"), advisor=_advisor(conn), policy=Policies())
+    code = pairing_requests_repo.list_pending(conn)[0].code
+    # Operator approves on the console → the account is now paired.
+    assert approve_pairing_request(conn, code).paired is True
+    # The same sender is now answered end-to-end.
+    result = handle_inbound(
+        conn, _inbound("what is the capital of France?"), advisor=_advisor(conn)
+    )
+    assert result.action == "answered"
+    assert result.reply is not None and "Paris" in result.reply.text
 
 
 def test_silent_policy_refuses_without_reply(conn) -> None:
@@ -152,6 +180,8 @@ def test_refusals_are_rate_limited(conn) -> None:
     assert first.reply is not None  # first refusal replies
     assert second.reply is None  # second within window is suppressed
     assert len(audit_repo.list_audit(conn, action=REFUSED_ACTION)) == 1
+    # Rate-limited messages don't mint extra codes either (at most one pending).
+    assert len(pairing_requests_repo.list_pending(conn)) <= 1
 
 
 # --- answered path (T8.3) ---------------------------------------------------
