@@ -1,39 +1,33 @@
 # Development Guide
 
-How to set up, develop, test, and run the deterministic AI assistant backend.
+How to develop, test, and contribute to the deterministic AI assistant backend.
 
-> Companion docs: [design-spec.md](design-spec.md) (what we're building and why),
-> [implementation-plan.md](implementation-plan.md) (the task-by-task build plan), and
+> **Just want to install and use it?** See [setup.md](setup.md) (install +
+> configure) and [usage.md](usage.md) (ask questions, run the bot, pair
+> accounts). This guide is for **working on the code**.
+>
+> Companion docs: [setup.md](setup.md), [usage.md](usage.md),
+> [design-spec.md](design-spec.md) (what we're building and why),
+> [implementation-plan.md](implementation-plan.md) (the task-by-task build plan),
 > [db-schema.md](db-schema.md) (the storage-layer schema reference).
 
 ---
 
 ## 1. Prerequisites
 
-- **Python 3.12+** (the project targets 3.10+, CI/dev uses 3.12).
-- A virtual environment at the **repo root**: `.venv/`.
-  - This machine has no system `pip` and only `python3` (no bare `python`), so
-    always use the venv interpreter rather than the system Python.
+- **Python 3.12+** (the project targets 3.10+, CI/dev uses 3.12) with the stdlib
+  `venv` module. This machine has no system `pip` and only `python3` (no bare
+  `python`), so always use the repo-root venv interpreter, `../.venv/bin/python`
+  (run from `backend/`).
+- On Debian/Ubuntu the `venv` module is `sudo apt install python3-venv`.
 
 ---
 
-## 2. One-time setup
+## 2. Setting up the development environment
 
-### Recommended: the setup script (reproducible, offline, pinned)
+### Install (recommended: the script)
 
-On a fresh checkout, run the setup script from the repo root:
-
-```bash
-./scripts/setup-env.sh
-```
-
-It creates `.venv/` and installs the **exact, pinned** dependencies from
-[`backend/requirements.lock`](../backend/requirements.lock) with
-`--require-hashes`, so any package whose bytes don't match the lock is rejected
-(a supply-chain guard — see §2.1). If the offline wheel cache
-[`vendor/wheels/`](../vendor/README.md) is present, the install runs **fully
-offline**; otherwise it fetches the pinned versions from PyPI (still
-hash-verified). Modes:
+From the repo root:
 
 ```bash
 ./scripts/setup-env.sh            # auto: offline if vendor/wheels exists, else PyPI
@@ -41,9 +35,18 @@ hash-verified). Modes:
 ./scripts/setup-env.sh --online   # ignore the wheelhouse; fetch from PyPI
 ```
 
-Prerequisite: `python3` (>=3.10) with the stdlib `venv` module. On Debian/Ubuntu
-that means `sudo apt install python3-venv` (the script prints this if it's
-missing).
+It creates `.venv/` and installs the **exact, pinned** dependencies from
+[`backend/requirements.lock`](../backend/requirements.lock) with
+`--require-hashes`, so any package whose bytes don't match the lock is rejected
+(a supply-chain guard — §2.1). If the offline wheel cache
+[`vendor/wheels/`](../vendor/README.md) is present the install runs **fully
+offline**; otherwise it fetches the pinned versions from PyPI (still
+hash-verified). After it runs, the package is importable as `app.*` (editable
+install) and the CLIs work.
+
+> End users get the environment **and** the configuration wizard in one step via
+> `./scripts/setup.sh` — see [setup.md](setup.md). This section is the
+> environment + dependency detail behind it.
 
 ### 2.1 Why pinned versions + hashes?
 
@@ -129,7 +132,8 @@ backend/
     advisor/
       providers.py          # AI provider transport (OpenAI-compatible / GitHub Models)
       redaction.py          # outbound secret-scrubbing guard
-    cli/
+    cli/                    # entry points (see usage.md): setup, ask, login, pair, telegram, verify, db
+      setup.py              # `python -m app.cli.setup` first-run configuration wizard
       verify.py             # `python -m app.cli.verify` config/auth check
       db.py                 # `python -m app.cli.db` migrate + inspect the schema
     config/
@@ -144,6 +148,7 @@ config/
   models.yaml               # role -> provider/model mapping (swap models here, not in code)
   policies.yaml             # tunable limits (declines, concurrency, TTLs, ...)
 scripts/
+  setup.sh                  # one command: env + the configuration wizard (see setup.md)
   setup-env.sh              # create .venv + install pinned deps (offline-first)
   fetch-wheels.sh           # repopulate vendor/wheels from the lock (after clone)
   lock-deps.sh              # (maintainer) refresh the wheelhouse + requirements.lock
@@ -156,21 +161,10 @@ docs/                       # design spec, implementation plan, db schema, this 
 
 ---
 
-## 4. Configuration & secrets
+## 4. Handling secrets in code
 
-Runtime configuration comes from two places:
-
-1. **`config/models.yaml`** — which provider/model each role uses. Changing a
-   model is a config edit here, never a code change.
-2. **`.env`** (git-ignored) — secrets and environment overrides. Copy the
-   template and fill it in:
-
-   ```bash
-   cp .env.example .env
-   # then edit .env and set GITHUB_MODELS_TOKEN=<your fine-grained PAT>
-   ```
-
-### Handling secrets in code
+Runtime configuration (`config/models.yaml` + `.env`) is covered in
+[setup.md](setup.md) §3. This section is about how the **code** keeps secrets safe.
 
 Secrets (API tokens, keys) are wrapped in the [`Secret`](../backend/app/security.py)
 type so they can never leak through logs, reprs, tracebacks, or string
@@ -197,25 +191,17 @@ settings object is automatically redacted. Rules of thumb:
 
 ---
 
-## 5. Running the system
+## 5. Running & using the assistant
 
-Today the runnable entry point is the configuration/auth check. It defaults to a
-**fully offline** config check and only touches the network when you opt in.
+The runnable CLIs — asking a question (`app.cli.ask`), running the Telegram bot
+(`app.cli.telegram`), pairing chat accounts (`app.cli.pair`), login, and DB
+inspection — are documented in [usage.md](usage.md). The config-only check used
+throughout development is:
 
 ```bash
 cd backend
-
-# Config-only, no network (default). Validates role->provider mapping and that
-# required API-key env vars are present. Exits 0 on success, 1 on a problem.
-../.venv/bin/python -m app.cli.verify --dry-run
-
-# Live check (opt-in): also performs a real catalog lookup + tiny completion.
-# Requires a valid GITHUB_MODELS_TOKEN in your environment / .env.
-../.venv/bin/python -m app.cli.verify --live
+../.venv/bin/python -m app.cli.verify --dry-run   # validate config, no network
 ```
-
-Later phases add more CLIs (e.g. `app.cli.db`, `app.cli.ask`) per the
-implementation plan.
 
 ---
 
