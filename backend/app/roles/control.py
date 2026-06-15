@@ -20,6 +20,7 @@ from app.advisor.schemas import AnswerDraft
 from app.advisor.wrapper import Advisor
 from app.roles import analyzer, boss, junior, pm
 from app.roles.envelope import Action, Role, RoleMessage
+from app.storage.repos import requests as requests_repo
 from app.storage.repos import role_messages as role_messages_repo
 from app.storage.repos.identities import ensure_owner
 from app.storage.repos.requests import Request
@@ -150,7 +151,12 @@ def _run_answer_path(
     user_id: int | None,
     causation_id: int,
 ) -> AskOutcome:
-    """Boss → Junior (answer_ask) → Boss → PM (deliver) for a simple ask."""
+    """Boss → Junior (answer_ask) for a simple ask.
+
+    On a validated answer: Boss → PM (deliver). When the Junior can't answer, the
+    ask is escalated into the planned-job path instead of dead-ending (§6A) —
+    see :func:`_escalate_unanswerable_ask`.
+    """
     request = route.request
     job_id = result.job_id
     assert job_id is not None  # the work path always minted a job
@@ -171,29 +177,17 @@ def _run_answer_path(
         conn, junior_result.envelope, causation_id=answer_ask_id
     )
 
-    # Boss routes ask_done → deliver (Boss → PM); the PM surfaces it to the user.
-    deliver_decision = boss.decide(junior_result.envelope)
-
-    # No citable answer (e.g. nothing in memory and no web search yet): deliver an
-    # honest "couldn't answer" message instead of crashing on the escalation.
+    # No citable answer (nothing in memory / no skill could answer it): rather
+    # than dead-ending, hand it back to be **planned + executed** like a complex
+    # job (§6A — the Junior hands non-trivial work to the Analyzer). The PM
+    # delivers the result later, asynchronously, as a progress update.
     if junior_result.answer is None:
-        message = (
-            "I couldn't answer this from what I have. I only answer from saved "
-            "memory right now — live web search isn't enabled yet — so I won't "
-            "guess without a source. Add a detail I can use, or try again once "
-            "web search is available."
+        return _escalate_unanswerable_ask(
+            conn, route=route, request=request, job_id=job_id, causation_id=ask_done_id
         )
-        delivery = pm.format_delivery(request, message)
-        _emit_boss(
-            conn,
-            deliver_decision,
-            request_id=request.id,
-            job_id=job_id,
-            payload={"unanswered": True},
-            causation_id=ask_done_id,
-        )
-        return AskOutcome(status="unanswered", request=request, job_id=job_id, delivery=delivery)
 
+    # Validated answer → Boss routes ask_done → deliver (Boss → PM).
+    deliver_decision = boss.decide(junior_result.envelope)
     delivery = pm.format_delivery(
         request, junior_result.answer.answer, sources=junior_result.answer.citations
     )
@@ -212,3 +206,35 @@ def _run_answer_path(
         answer=junior_result.answer,
         delivery=delivery,
     )
+
+
+def _escalate_unanswerable_ask(
+    conn,
+    *,
+    route: pm.RouteResult,
+    request: Request,
+    job_id: int,
+    causation_id: int,
+) -> AskOutcome:
+    """Re-route a simple ask the Junior couldn't answer into the planned-job path.
+
+    Per §6A the Junior Worker "hands anything non-trivial to the Analyzer for
+    authoritative classification + planning." So we **promote** the misclassified
+    ask to a ``task`` and route it to plan review — making it indistinguishable
+    from a natively-complex job, so the per-job runner (which plans, calls or
+    implements skills, and signs off) treats both uniformly. The answer is
+    delivered later as a PM progress update (async), not in this turn.
+    """
+    requests_repo.set_job_kind(conn, job_id, "task")
+
+    # Boss routes the escalation to plan review (same as the `plan_ready` verdict).
+    decision = boss.BossDecision(Role.company_expert, Action.review_plan)
+    _emit_boss(
+        conn,
+        decision,
+        request_id=request.id,
+        job_id=job_id,
+        payload={"escalated_from": "ask", "card": route.card},
+        causation_id=causation_id,
+    )
+    return AskOutcome(status="planned", request=request, job_id=job_id)

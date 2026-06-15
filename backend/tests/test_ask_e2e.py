@@ -153,6 +153,36 @@ def test_complex_request_is_classified_but_not_executed(conn) -> None:
     assert actions == ["route_request", "analyze", "analysis_done", "review_plan"]
 
 
+def test_unanswerable_ask_escalates_to_planned_job(conn) -> None:
+    # Classified a simple ask, but the Junior can't produce a valid answer (no
+    # memory + an unparseable draft). Per §6A it's handed back to be planned —
+    # NOT dead-ended — so it becomes a task job the runner will work + report.
+    user_id = ensure_owner(conn)
+    outcome = run_ask(
+        conn,
+        _advisor(conn, planner=ANALYSIS_ASK, drafter="(this is not valid json)"),
+        "explain quantum gravity from first principles",
+        user_id=user_id,
+    )
+
+    assert outcome.status == "planned"
+    assert outcome.job_id is not None
+    # The misclassified ask was promoted to a task for the planned-job path.
+    job = requests_repo.get_job(conn, outcome.job_id)
+    assert job is not None and job.kind == "task"
+    # The trace shows the Junior attempt, then the escalation to plan review
+    # (not a deliver) — the answer comes later, asynchronously.
+    actions = [m["action"] for m in role_messages_repo.list_role_messages(conn, outcome.request.id)]
+    assert actions == [
+        "route_request",
+        "analyze",
+        "analysis_done",
+        "answer_ask",
+        "ask_done",
+        "review_plan",
+    ]
+
+
 def test_owner_is_created_once(conn) -> None:
     first = ensure_owner(conn)
     second = ensure_owner(conn)

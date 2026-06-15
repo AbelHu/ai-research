@@ -60,6 +60,15 @@ def test_request_job_link_round_trip(conn) -> None:
     assert repo.get_job_for_request(conn, req.id) == job
 
 
+def test_set_job_kind_promotes_ask_to_task(conn) -> None:
+    # An unanswerable "ask" is promoted to a planned kind (§6A escalation).
+    req = repo.create_request(conn, title="t", now=datetime(2026, 6, 14, 12, 0, 0))
+    job = repo.create_job(conn, request_id=req.id, kind="ask", complexity="simple")
+    promoted = repo.set_job_kind(conn, job.id, "task")
+    assert promoted.kind == "task"
+    assert repo.get_job(conn, job.id).kind == "task"  # persisted
+
+
 def test_list_requests_filters_by_state_newest_first(conn) -> None:
     a = repo.create_request(conn, now=datetime(2026, 6, 14, 12, 0, 0))
     b = repo.create_request(conn, now=datetime(2026, 6, 14, 12, 0, 1))

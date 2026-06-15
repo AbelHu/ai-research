@@ -205,6 +205,27 @@ def test_paired_sender_is_answered_end_to_end(conn) -> None:
     assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 1
 
 
+def test_paired_sender_unanswerable_ask_is_escalated(conn) -> None:
+    # The Junior can't answer (unparseable draft) → the ask is escalated to a
+    # planned job and the user is told it'll be worked on (not a dead-end).
+    minted = pairing_codes_repo.mint_code(conn)
+    bad = Advisor(
+        resolve_provider=lambda role: {
+            "planner": FakeProvider(ANALYSIS_ASK),
+            "drafter": FakeProvider("(not valid json)"),
+        }[role],
+        conn=conn,
+    )
+    handle_inbound(conn, _inbound(f"/pair {minted.code}"), advisor=bad)
+
+    result = handle_inbound(conn, _inbound("explain quantum gravity"), advisor=bad)
+
+    assert result.action == "answered"  # gateway admitted + handled it
+    assert result.reply is not None and "work through it" in result.reply.text
+    # It became a task job (promoted from the misclassified ask).
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE kind = 'task'").fetchone()[0] == 1
+
+
 def test_paired_then_revoked_sender_is_refused(conn) -> None:
     minted = pairing_codes_repo.mint_code(conn)
     handle_inbound(conn, _inbound(f"/pair {minted.code}"), advisor=_advisor(conn))
