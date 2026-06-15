@@ -11,7 +11,15 @@ import textwrap
 
 import pytest
 
-from app.setup.config_writer import ROUTE_COPILOT, ROUTE_MODELS, EnvFile, current_route
+from app.setup.config_writer import (
+    ROUTE_COPILOT,
+    ROUTE_MODELS,
+    ROUTE_OLLAMA,
+    ROUTE_OPENAI,
+    EnvFile,
+    current_api_key_env,
+    current_route,
+)
 from app.setup.prompts import Prompter
 from app.setup.steps import (
     CONFIGURED,
@@ -149,6 +157,108 @@ def test_provider_reconfigure_forces_prompt_even_when_usable(models_path) -> Non
         getenv=lambda _k: None,
     )
     assert result.status == CONFIGURED  # re-asked despite being logged in
+
+
+def test_provider_route_c_custom_openai(models_path) -> None:
+    # Choose C, name it, openai-compatible mode, base URL, model, then the key.
+    prompter, _ = _prompter(
+        answers=["C", "openrouter", "openai-compatible", "https://openrouter.ai/api/v1", "gpt-4o"],
+        secrets=["sk-custom-key"],
+    )
+    env = EnvFile("")
+    result = provider_step(
+        prompter, env, models_path, auth=_FakeAuth(False), getenv=lambda _k: None
+    )
+    assert result.status == CONFIGURED
+    assert current_route(models_path) == ROUTE_OPENAI
+    assert current_api_key_env(models_path) == "OPENROUTER_API_KEY"
+    # Secret lands in .env under the derived name; only the NAME is in models.yaml.
+    assert env.get("OPENROUTER_API_KEY") == "sk-custom-key"
+    out = models_path.read_text(encoding="utf-8")
+    assert "base_url: https://openrouter.ai/api/v1" in out
+    assert "api_mode: chat_completions" in out  # default mode pinned in the file
+    assert "sk-custom-key" not in out
+
+
+def test_provider_route_c_explicit_api_mode(models_path) -> None:
+    # The user pins api_mode explicitly; it's recorded + echoed in the detail.
+    prompter, _ = _prompter(
+        answers=["C", "azure", "openai-compatible", "https://x/v1", "gpt-4o", "chat_completions"],
+        secrets=["sk-k"],
+    )
+    result = provider_step(
+        prompter, EnvFile(""), models_path, auth=_FakeAuth(False), getenv=lambda _k: None
+    )
+    assert result.status == CONFIGURED
+    assert "chat_completions" in result.detail
+    assert "api_mode: chat_completions" in models_path.read_text(encoding="utf-8")
+
+
+def test_provider_route_c_unsupported_api_mode_falls_back(models_path) -> None:
+    # An unsupported api_mode warns and falls back to the default (never blocks).
+    prompter, out = _prompter(
+        answers=["C", "x", "openai-compatible", "https://x/v1", "gpt-4o", "responses"],
+        secrets=[""],
+    )
+    result = provider_step(
+        prompter, EnvFile(""), models_path, auth=_FakeAuth(False), getenv=lambda _k: None
+    )
+    assert result.status == CONFIGURED
+    assert "api_mode: chat_completions" in models_path.read_text(encoding="utf-8")
+    assert any("isn't supported" in line for line in out)
+
+
+def test_provider_route_c_ollama_needs_no_key(models_path) -> None:
+    # Blank base URL falls back to the Ollama default; no secret is prompted.
+    prompter, _ = _prompter(answers=["C", "local", "ollama", "", "llama3.1:8b"])
+    env = EnvFile("")
+    result = provider_step(
+        prompter, env, models_path, auth=_FakeAuth(False), getenv=lambda _k: None
+    )
+    assert result.status == CONFIGURED
+    assert current_route(models_path) == ROUTE_OLLAMA
+    assert current_api_key_env(models_path) is None
+    assert env.dumps() == ""  # nothing secret captured
+
+
+def test_provider_route_c_without_model_is_missing(models_path) -> None:
+    prompter, _ = _prompter(answers=["C", "x", "openai-compatible", "https://x/v1", ""])
+    result = provider_step(
+        prompter, EnvFile(""), models_path, auth=_FakeAuth(False), getenv=lambda _k: None
+    )
+    assert result.status == MISSING
+
+
+def test_provider_kept_when_custom_key_present(tmp_path) -> None:
+    models = textwrap.dedent(
+        """\
+        roles:
+          drafter: quality
+        providers:
+          fast:
+            kind: openai_compatible
+            model: gpt-4o
+            base_url: https://x/v1
+            api_key_env: OPENROUTER_API_KEY
+          quality:
+            kind: openai_compatible
+            model: gpt-4o
+            base_url: https://x/v1
+            api_key_env: OPENROUTER_API_KEY
+        """
+    )
+    path = tmp_path / "models.yaml"
+    path.write_text(models, encoding="utf-8")
+    prompter, _ = _prompter()  # no scripted answers → would raise if it prompted
+    result = provider_step(
+        prompter,
+        EnvFile("OPENROUTER_API_KEY=sk-present\n"),
+        path,
+        auth=_FakeAuth(False),
+        getenv=lambda _k: None,
+    )
+    assert result.status == KEPT
+    assert ROUTE_OPENAI in result.detail
 
 
 # --- T9.4 telegram ----------------------------------------------------------

@@ -93,6 +93,12 @@ class EnvFile:
 # because GitHub Copilot has no embeddings endpoint.
 ROUTE_COPILOT = "github_copilot"  # Route A: device-flow login, no PAT
 ROUTE_MODELS = "github_models"  # Route B: GitHub Models PAT
+# Route C ("Other"): any OpenAI-compatible endpoint (OpenAI, Azure, OpenRouter,
+# Together, Groq, vLLM, LM Studio, …) or a local Ollama server. The user brings
+# the base_url + model (+ optional API key). The key is stored in `.env`; only
+# its env-var NAME is written to models.yaml — secrets never go inline (§12).
+ROUTE_OPENAI = "openai_compatible"
+ROUTE_OLLAMA = "ollama"
 
 # Default model ids per route. Copilot uses bare ids; Models uses {publisher}/id.
 _ROUTE_MODELS_DEFAULTS = {
@@ -164,11 +170,11 @@ def _block_matches(lines: list[str], block: _ProviderBlock, route: str, model: s
     return has_pat == (route == ROUTE_MODELS)
 
 
-def current_route(models_path: Path, *, role: str = "drafter") -> str | None:
-    """Return the provider ``kind`` backing ``role`` (for skip-existing logic).
+def _provider_for_role(models_path: Path, role: str) -> dict | None:
+    """Deterministically read the provider dict backing ``role`` (or ``None``).
 
-    Reads the file deterministically (a small parse, no model load). ``None`` if
-    the file/role/provider can't be resolved.
+    A small YAML parse (no model load), shared by ``current_route`` and
+    ``current_api_key_env`` for the wizard's skip-existing detection.
     """
     import yaml
 
@@ -177,10 +183,33 @@ def current_route(models_path: Path, *, role: str = "drafter") -> str | None:
     raw = yaml.safe_load(models_path.read_text(encoding="utf-8")) or {}
     provider_name = (raw.get("roles") or {}).get(role)
     provider = (raw.get("providers") or {}).get(provider_name) if provider_name else None
-    if not isinstance(provider, dict):
+    return provider if isinstance(provider, dict) else None
+
+
+def current_route(models_path: Path, *, role: str = "drafter") -> str | None:
+    """Return the provider ``kind`` backing ``role`` (for skip-existing logic).
+
+    Reads the file deterministically (a small parse, no model load). ``None`` if
+    the file/role/provider can't be resolved.
+    """
+    provider = _provider_for_role(models_path, role)
+    if provider is None:
         return None
     kind = provider.get("kind")
     return str(kind) if kind is not None else None
+
+
+def current_api_key_env(models_path: Path, *, role: str = "drafter") -> str | None:
+    """Return the ``api_key_env`` of the provider backing ``role`` (or ``None``).
+
+    The wizard's skip-existing check for a custom (Route C) provider treats the
+    route as configured when this env var holds a value.
+    """
+    provider = _provider_for_role(models_path, role)
+    if provider is None:
+        return None
+    key = provider.get("api_key_env")
+    return str(key) if key else None
 
 
 def set_provider_route(
@@ -219,6 +248,88 @@ def set_provider_route(
         if _block_matches(lines, block, route, models[name]):
             continue  # already correct → leave it (and its comments) untouched
         replacement = _provider_block_lines(name, route, models[name])
+        lines[block.start : block.end] = replacement
+        changed = True
+
+    if changed:
+        models_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return changed
+
+
+# --- Route C: custom OpenAI-compatible / Ollama provider --------------------
+
+
+def api_key_env_for(name: str) -> str:
+    """Derive a ``.env`` key name for a custom provider.
+
+    e.g. ``"OpenRouter"`` -> ``OPENROUTER_API_KEY``. Non-alphanumeric runs become
+    a single underscore; an empty/odd name falls back to ``CUSTOM_API_KEY``.
+    """
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper()
+    return f"{slug or 'CUSTOM'}_API_KEY"
+
+
+def _custom_block_lines(
+    name: str,
+    *,
+    kind: str,
+    model: str,
+    base_url: str,
+    api_mode: str,
+    api_key_env: str | None,
+) -> list[str]:
+    """Render the field lines for a custom (Route C) provider block."""
+    lines = [f"  {name}:", f"    kind: {kind}", f"    model: {model}"]
+    if base_url:
+        lines.append(f"    base_url: {base_url}")
+    lines.append(f"    api_mode: {api_mode}")
+    if api_key_env:
+        lines.append(f"    api_key_env: {api_key_env}")
+    return lines
+
+
+def set_custom_provider(
+    models_path: Path,
+    *,
+    model: str,
+    base_url: str,
+    kind: str = ROUTE_OPENAI,
+    api_mode: str = "chat_completions",
+    api_key_env: str | None = None,
+) -> bool:
+    """Point ``fast`` + ``quality`` at a custom OpenAI-compatible / Ollama endpoint.
+
+    Edits only those two blocks in place (returns ``True`` if the file changed),
+    leaving every other line — including the ``embedder`` provider and the how-to
+    comments — untouched. Both roles share the one endpoint/model (a BYO provider
+    usually exposes a single model). Raises ``ValueError`` for an unsupported
+    kind or a missing provider block.
+    """
+    if kind not in (ROUTE_OPENAI, ROUTE_OLLAMA):
+        raise ValueError(f"unsupported custom provider kind: {kind!r}")
+
+    lines = models_path.read_text(encoding="utf-8").splitlines()
+    blocks = []
+    for name in ("fast", "quality"):
+        block = _find_provider_block(lines, name)
+        if block is None:
+            raise ValueError(f"provider block {name!r} not found in {models_path}")
+        blocks.append((name, block))
+    # Replace the later block first so earlier indices stay valid.
+    blocks.sort(key=lambda nb: nb[1].start, reverse=True)
+
+    changed = False
+    for name, block in blocks:
+        replacement = _custom_block_lines(
+            name,
+            kind=kind,
+            model=model,
+            base_url=base_url,
+            api_mode=api_mode,
+            api_key_env=api_key_env,
+        )
+        if lines[block.start : block.end] == replacement:
+            continue  # already exactly this → leave it (idempotent)
         lines[block.start : block.end] = replacement
         changed = True
 

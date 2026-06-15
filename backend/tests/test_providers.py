@@ -22,8 +22,10 @@ from app.advisor.providers import (
     CompletionRequest,
     EmbedRequest,
     OpenAICompatibleProvider,
+    build_provider,
 )
 from app.advisor.redaction import SecretLeakError
+from app.config.settings import ProviderConfig
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -180,3 +182,72 @@ def test_embed_redacts(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # No request was sent at all, so the secret never left the machine.
     assert "request" not in captured
+
+
+# --- build_provider: custom (Route C) providers -----------------------------
+
+
+def test_build_provider_openai_compatible_sends_env_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A BYO OpenAI-compatible provider: the key comes from the named env var and
+    # rides the Authorization header to the configured base_url.
+    captured = _install_mock_transport(monkeypatch, _chat_handler)
+    cfg = ProviderConfig(
+        kind="openai_compatible",
+        model="gpt-4o",
+        base_url="https://openrouter.ai/api/v1",
+        api_key_env="OPENROUTER_API_KEY",
+    )
+    provider = build_provider(cfg, getenv={"OPENROUTER_API_KEY": "sk-xyz"}.get)
+    assert isinstance(provider, OpenAICompatibleProvider)
+
+    provider.complete(CompletionRequest(messages=[{"role": "user", "content": "hi"}]))
+    req = captured["request"]
+    assert str(req.url) == "https://openrouter.ai/api/v1/chat/completions"
+    assert req.headers["Authorization"] == "Bearer sk-xyz"
+
+
+def test_build_provider_openai_compatible_requires_base_url() -> None:
+    cfg = ProviderConfig(kind="openai_compatible", model="gpt-4o")
+    with pytest.raises(ValueError):
+        build_provider(cfg, getenv=lambda _k: None)
+
+
+def test_build_provider_ollama_appends_v1_and_needs_no_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _install_mock_transport(monkeypatch, _chat_handler)
+    cfg = ProviderConfig(kind="ollama", model="llama3.1:8b", base_url="http://localhost:11434")
+    provider = build_provider(cfg, getenv=lambda _k: None)
+
+    provider.complete(CompletionRequest(messages=[{"role": "user", "content": "hi"}]))
+    req = captured["request"]
+    assert str(req.url) == "http://localhost:11434/v1/chat/completions"
+    assert "Authorization" not in req.headers
+
+
+# --- api_mode (chat request protocol) ---------------------------------------
+
+
+def test_provider_defaults_to_chat_completions() -> None:
+    provider = OpenAICompatibleProvider(base_url="https://x/v1", model="m")
+    assert provider.api_mode == "chat_completions"
+
+
+def test_provider_rejects_unsupported_api_mode() -> None:
+    with pytest.raises(ValueError):
+        OpenAICompatibleProvider(base_url="https://x/v1", model="m", api_mode="responses")
+
+
+def test_build_provider_honors_api_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _install_mock_transport(monkeypatch, _chat_handler)
+    cfg = ProviderConfig(
+        kind="openai_compatible",
+        model="m",
+        base_url="https://x/v1",
+        api_mode="chat_completions",
+    )
+    provider = build_provider(cfg, getenv=lambda _k: None)
+    assert provider.api_mode == "chat_completions"
+
+    provider.complete(CompletionRequest(messages=[{"role": "user", "content": "hi"}]))
+    assert str(captured["request"].url) == "https://x/v1/chat/completions"

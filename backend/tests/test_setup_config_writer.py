@@ -13,8 +13,13 @@ import pytest
 from app.setup.config_writer import (
     ROUTE_COPILOT,
     ROUTE_MODELS,
+    ROUTE_OLLAMA,
+    ROUTE_OPENAI,
     EnvFile,
+    api_key_env_for,
+    current_api_key_env,
     current_route,
+    set_custom_provider,
     set_provider_route,
 )
 
@@ -132,6 +137,70 @@ def test_switch_route_is_idempotent(tmp_path) -> None:
     assert set_provider_route(path, ROUTE_COPILOT) is False  # already Route A → no change
     set_provider_route(path, ROUTE_MODELS)
     assert set_provider_route(path, ROUTE_MODELS) is False  # second apply → no change
+
+
+# --- models.yaml custom (Route C) provider ----------------------------------
+
+
+def test_set_custom_provider_points_fast_and_quality(tmp_path) -> None:
+    path = tmp_path / "models.yaml"
+    path.write_text(SHIPPED_MODELS, encoding="utf-8")
+
+    changed = set_custom_provider(
+        path,
+        model="gpt-4o",
+        base_url="https://openrouter.ai/api/v1",
+        api_key_env="OPENROUTER_API_KEY",
+    )
+    assert changed is True
+    assert current_route(path) == ROUTE_OPENAI
+    assert current_api_key_env(path) == "OPENROUTER_API_KEY"
+
+    out = path.read_text(encoding="utf-8")
+    assert out.count("kind: openai_compatible") == 2  # fast + quality
+    assert out.count("base_url: https://openrouter.ai/api/v1") == 2
+    assert out.count("api_mode: chat_completions") == 2  # default mode written explicitly
+    assert out.count("api_key_env: OPENROUTER_API_KEY") == 2
+    # The embed block + roles section + header comment are all preserved.
+    assert "model: openai/text-embedding-3-small" in out
+    assert "drafter: quality" in out
+    assert "# Model role -> provider mapping." in out
+
+
+def test_set_custom_provider_ollama_omits_key(tmp_path) -> None:
+    path = tmp_path / "models.yaml"
+    path.write_text(SHIPPED_MODELS, encoding="utf-8")
+
+    set_custom_provider(
+        path, kind=ROUTE_OLLAMA, model="llama3.1:8b", base_url="http://localhost:11434/v1"
+    )
+    assert current_route(path) == ROUTE_OLLAMA
+    assert current_api_key_env(path) is None  # no key on the fast/quality blocks
+    assert path.read_text(encoding="utf-8").count("kind: ollama") == 2
+
+
+def test_set_custom_provider_is_idempotent(tmp_path) -> None:
+    path = tmp_path / "models.yaml"
+    path.write_text(SHIPPED_MODELS, encoding="utf-8")
+    first = set_custom_provider(path, model="m", base_url="https://x/v1", api_key_env="K_API_KEY")
+    again = set_custom_provider(path, model="m", base_url="https://x/v1", api_key_env="K_API_KEY")
+    assert first is True
+    assert again is False  # second apply → no change
+
+
+def test_set_custom_provider_rejects_unknown_kind(tmp_path) -> None:
+    path = tmp_path / "models.yaml"
+    path.write_text(SHIPPED_MODELS, encoding="utf-8")
+    with pytest.raises(ValueError):
+        set_custom_provider(path, kind=ROUTE_COPILOT, model="m", base_url="https://x/v1")
+
+
+def test_api_key_env_for_derivation() -> None:
+    assert api_key_env_for("OpenRouter") == "OPENROUTER_API_KEY"
+    assert api_key_env_for("azure openai") == "AZURE_OPENAI_API_KEY"
+    assert api_key_env_for("my-llm.v2") == "MY_LLM_V2_API_KEY"
+    assert api_key_env_for("") == "CUSTOM_API_KEY"
+    assert api_key_env_for("***") == "CUSTOM_API_KEY"
 
 
 def test_switch_back_to_copilot_drops_api_key_env(tmp_path) -> None:

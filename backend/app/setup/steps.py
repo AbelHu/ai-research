@@ -19,8 +19,13 @@ from pathlib import Path
 from app.setup.config_writer import (
     ROUTE_COPILOT,
     ROUTE_MODELS,
+    ROUTE_OLLAMA,
+    ROUTE_OPENAI,
     EnvFile,
+    api_key_env_for,
+    current_api_key_env,
     current_route,
+    set_custom_provider,
     set_provider_route,
 )
 from app.setup.prompts import Prompter
@@ -48,12 +53,27 @@ class StepResult:
 # --- T9.3: AI provider ------------------------------------------------------
 
 
-def _provider_usable(route: str | None, env: EnvFile, auth, getenv: Getenv) -> bool:
+def _provider_usable(
+    route: str | None,
+    env: EnvFile,
+    auth,
+    getenv: Getenv,
+    *,
+    api_key_env: str | None = None,
+) -> bool:
     """Whether the configured route is already usable (skip-existing detection)."""
     if route == ROUTE_COPILOT:
         return bool(auth and auth.is_logged_in())
     if route == ROUTE_MODELS:
         return env.has_value("GITHUB_MODELS_TOKEN") or bool(getenv("GITHUB_MODELS_TOKEN"))
+    if route == ROUTE_OLLAMA:
+        return True  # local endpoint — no credential needed
+    if route == ROUTE_OPENAI:
+        # A custom endpoint is usable when its API-key env var holds a value, or
+        # when it declares no key at all (e.g. an unauthenticated local server).
+        if not api_key_env:
+            return True
+        return env.has_value(api_key_env) or bool(getenv(api_key_env))
     return False
 
 
@@ -81,13 +101,18 @@ def provider_step(
         auth = GitHubCopilotAuth()
 
     route = current_route(models_path)
-    if not reconfigure and _provider_usable(route, env, auth, getenv):
+    if not reconfigure and _provider_usable(
+        route, env, auth, getenv, api_key_env=current_api_key_env(models_path)
+    ):
         return StepResult("AI provider", KEPT, f"route={route}")
 
     prompter.say("AI provider:")
     prompter.say("  A) GitHub Copilot — sign in with your GitHub account (device flow, no PAT)")
     prompter.say("  B) GitHub Models — paste a fine-grained PAT (models: read)")
-    choice = prompter.ask("Choose A or B", default="A").strip().upper()
+    prompter.say(
+        "  C) Other — any OpenAI-compatible endpoint (OpenAI, Azure, OpenRouter, Ollama, …)"
+    )
+    choice = prompter.ask("Choose A, B or C", default="A").strip().upper()
 
     if choice.startswith("B"):
         token = prompter.secret("GitHub Models PAT", current=env.get("GITHUB_MODELS_TOKEN") or None)
@@ -97,11 +122,74 @@ def provider_step(
         set_provider_route(models_path, ROUTE_MODELS)
         return StepResult("AI provider", CONFIGURED, "route=github_models")
 
+    if choice.startswith("C"):
+        return _configure_custom_provider(prompter, env, models_path)
+
     # Route A: device-flow login, then point fast/quality at github_copilot.
     if not login_fn(auth, prompter):
         return StepResult("AI provider", MISSING, "device-flow login did not complete")
     set_provider_route(models_path, ROUTE_COPILOT)
     return StepResult("AI provider", CONFIGURED, "route=github_copilot")
+
+
+def _configure_custom_provider(prompter: Prompter, env: EnvFile, models_path: Path) -> StepResult:
+    """Route C: configure a BYO OpenAI-compatible / Ollama provider from prompts.
+
+    The API key (if any) is written to ``.env`` under a derived name and only
+    that **name** is recorded in ``models.yaml`` (secrets never inline, §12).
+    Both the ``fast`` and ``quality`` roles point at this single endpoint; the
+    ``embedder`` is left as-is (swap it by hand if your endpoint embeds too).
+    """
+    from app.advisor.providers import DEFAULT_API_MODE, SUPPORTED_API_MODES
+
+    name = prompter.ask("Provider name (e.g. openrouter, azure, local)", default="custom").strip()
+    name = name or "custom"
+    adapter = prompter.ask(
+        "Provider type (openai-compatible | ollama)", default="openai-compatible"
+    )
+    kind = ROUTE_OLLAMA if adapter.strip().lower().startswith("ollama") else ROUTE_OPENAI
+
+    default_base = "http://localhost:11434/v1" if kind == ROUTE_OLLAMA else None
+    base_url = prompter.ask("Base URL", default=default_base).strip()
+    if not base_url:
+        return StepResult("AI provider", MISSING, "no base URL entered")
+    model = prompter.ask("Model id").strip()
+    if not model:
+        return StepResult("AI provider", MISSING, "no model entered")
+
+    # api_mode = chat request protocol. chat_completions is the default + the
+    # only one wired today; an unsupported value warns and falls back (never
+    # blocks setup) so the file is always left in a runnable state.
+    api_mode = prompter.ask("API mode", default=DEFAULT_API_MODE).strip() or DEFAULT_API_MODE
+    if api_mode not in SUPPORTED_API_MODES:
+        supported = ", ".join(sorted(SUPPORTED_API_MODES))
+        prompter.say(
+            f"  ! api_mode {api_mode!r} isn't supported yet — using {DEFAULT_API_MODE} "
+            f"(supported: {supported})."
+        )
+        api_mode = DEFAULT_API_MODE
+
+    api_key_env: str | None = None
+    if kind == ROUTE_OPENAI:
+        api_key_env = api_key_env_for(name)
+        key = prompter.secret(
+            f"API key (saved to .env as {api_key_env}; blank if none)",
+            current=env.get(api_key_env) or None,
+        )
+        if key:
+            env.set(api_key_env, key)
+        elif not env.has_value(api_key_env):
+            api_key_env = None  # keyless endpoint (e.g. local server without auth)
+
+    set_custom_provider(
+        models_path,
+        kind=kind,
+        model=model,
+        base_url=base_url,
+        api_mode=api_mode,
+        api_key_env=api_key_env,
+    )
+    return StepResult("AI provider", CONFIGURED, f"route={kind} ({name}, {api_mode})")
 
 
 # --- T9.4: Telegram ---------------------------------------------------------

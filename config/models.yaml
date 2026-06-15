@@ -28,11 +28,14 @@ providers:
     api_key_env: GITHUB_MODELS_TOKEN
     org_env: GITHUB_ORG
 
-  # Swap providers without code changes - e.g. BYOK for production rate limits:
+  # Swap providers without code changes - e.g. BYOK for production rate limits.
+  # The setup wizard's option C writes this for you: `python -m app.cli.setup`
+  # (it stores the key in .env and references only its NAME here).
   # quality:
   #   kind: openai_compatible
   #   model: gpt-4o
   #   base_url: https://api.openai.com/v1
+  #   api_mode: chat_completions   # request protocol (default; the only one wired today)
   #   api_key_env: OPENAI_API_KEY
   # local-quality:
   #   kind: ollama

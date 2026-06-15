@@ -52,6 +52,7 @@ class Settings(BaseSettings):
 class ProviderConfig(BaseModel):
     kind: str
     model: str
+    api_mode: str = "chat_completions"
     base_url: str | None = None
     api_key_env: str | None = None
     org_env: str | None = None

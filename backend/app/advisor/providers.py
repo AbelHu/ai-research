@@ -27,6 +27,13 @@ from app.security import Secret
 GITHUB_MODELS_HOST = "https://models.github.ai"
 GITHUB_MODELS_API_VERSION = "2026-03-10"
 
+# Chat request protocol ("api_mode"). Every backend here speaks the OpenAI
+# **Chat Completions** API (POST ``{base_url}/chat/completions``); the field lets
+# a model definition pin it explicitly and leaves room for future protocols.
+DEFAULT_API_MODE = "chat_completions"
+_API_MODE_PATHS = {"chat_completions": "chat/completions"}
+SUPPORTED_API_MODES = frozenset(_API_MODE_PATHS)
+
 
 def _as_secret(value: Secret | str | None) -> Secret | None:
     """Normalize an API key into a `Secret` (or None) so it cannot leak."""
@@ -80,11 +87,17 @@ class OpenAICompatibleProvider:
         base_url: str,
         model: str,
         api_key: Secret | str | None = None,
+        api_mode: str = DEFAULT_API_MODE,
         extra_headers: dict | None = None,
         timeout: float = 60.0,
     ) -> None:
+        if api_mode not in _API_MODE_PATHS:
+            supported = ", ".join(sorted(SUPPORTED_API_MODES))
+            raise ValueError(f"unsupported api_mode {api_mode!r} (supported: {supported})")
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.api_mode = api_mode
+        self._chat_path = _API_MODE_PATHS[api_mode]
         self._api_key = _as_secret(api_key)
         self._extra_headers = extra_headers or {}
         self._timeout = timeout
@@ -110,7 +123,7 @@ class OpenAICompatibleProvider:
 
         with httpx.Client(timeout=self._timeout) as client:
             resp = client.post(
-                f"{self.base_url}/chat/completions",
+                f"{self.base_url}/{self._chat_path}",
                 headers=self._headers(),
                 json=payload,
             )
@@ -229,6 +242,7 @@ def build_provider(provider_cfg, *, getenv=os.getenv) -> AIProvider:
             base_url=provider_cfg.base_url,
             model=provider_cfg.model,
             api_key=Secret(raw_key) if raw_key else None,
+            api_mode=provider_cfg.api_mode,
         )
 
     if kind == "ollama":
@@ -236,7 +250,9 @@ def build_provider(provider_cfg, *, getenv=os.getenv) -> AIProvider:
         base_url = (provider_cfg.base_url or "http://localhost:11434").rstrip("/")
         if not base_url.endswith("/v1"):
             base_url = f"{base_url}/v1"
-        return OpenAICompatibleProvider(base_url=base_url, model=provider_cfg.model)
+        return OpenAICompatibleProvider(
+            base_url=base_url, model=provider_cfg.model, api_mode=provider_cfg.api_mode
+        )
 
     raise ValueError(f"unknown provider kind: {kind!r}")
 

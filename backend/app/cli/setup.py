@@ -30,12 +30,13 @@ from dotenv import load_dotenv
 
 from app.cli.verify import run_dry_run
 from app.config.settings import DEFAULT_MODELS_CONFIG, REPO_ROOT, load_models_config
-from app.setup.config_writer import ROUTE_COPILOT, ROUTE_MODELS, EnvFile, current_route
+from app.setup.config_writer import EnvFile, current_api_key_env, current_route
 from app.setup.prompts import Prompter
 from app.setup.steps import (
     KEPT,
     MISSING,
     StepResult,
+    _provider_usable,
     pairing_step,
     provider_step,
     telegram_step,
@@ -77,12 +78,9 @@ def check(
         auth = GitHubCopilotAuth()
 
     route = current_route(models_path)
-    if route == ROUTE_COPILOT:
-        provider_ok = bool(auth.is_logged_in())
-    elif route == ROUTE_MODELS:
-        provider_ok = env.has_value("GITHUB_MODELS_TOKEN") or bool(getenv("GITHUB_MODELS_TOKEN"))
-    else:
-        provider_ok = False
+    provider_ok = _provider_usable(
+        route, env, auth, getenv, api_key_env=current_api_key_env(models_path)
+    )
 
     # Chat pairing is request-and-approve at runtime (no GitHub) — informational,
     # never a setup blocker; report how many accounts are currently paired.
