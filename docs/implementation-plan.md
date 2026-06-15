@@ -69,7 +69,8 @@ Run from `backend/` unless noted.
 | **P6** | Complex jobs (task **and** feature) | a task job runs phases with sign-off; a feature job emits gated generated code | §6B, §5 |
 | **P7** | Auth (device flow) & owner pairing | `login` + `pair` + allowlist | §7.2, §10.1 |
 | **P8** | Channels (Telegram) | answer a real Telegram message | §10 |
-| **P9** | Web app (FastAPI + dashboard) | Requests/System/Reports pages | §11 |
+| **P9** | First-run setup & onboarding | one `setup` command configures + verifies an existing checkout | §7.2, §10, §13 |
+| **P10** | Web app (FastAPI + dashboard) | Requests/System/Reports pages | §11 |
 
 Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; P7 can move earlier if you want pairing before the CLI harness.
 
@@ -288,30 +289,54 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 ---
 
-## P9 — Web app: FastAPI + dashboard (§11)
+## P9 — First-run setup & onboarding wizard (§7.2, §10, §13)
+
+> Goal: one guided command takes an **already-checked-out repo** to a **configured, verified, runnable** app — pick + authenticate the AI provider, set the Telegram bot token, and establish + pair the owner — **without hand-editing `.env` or `config/models.yaml`**. The wizard **orchestrates the pieces that already exist** (device-flow `login`, `pair`, `verify`, the Telegram adapter); it adds no new control path. It does **no git operations** (no `git clone`/`pull`) and touches **no source files** — it only writes config (`.env`, `config/models.yaml`) + the auth cache; getting the code is the user's `git clone`, out of scope here. Every step is **idempotent + re-runnable** and **unit-tested offline** with injected I/O — no real prompts, no network, no secrets in tests/logs (§12).
+>
+> **Skip what already works (don't clobber).** Each step first **detects existing configuration** and, when present + usable, **skips by default** — the wizard never overwrites a working `.env` value, provider route, cached login, or owner pairing unless the user asks. The default run only fills **gaps**; it reports each step as `configured (kept)` / `set up now` / `still missing`. Overriding is explicit: `--reconfigure[=step]` re-asks (and only then may replace), and a detect-only `--check` changes nothing. This keeps re-runs safe on a machine that's already partly set up.
+
+- [ ] **T9.1 — `.env` + `models.yaml` config writer (pure, idempotent).** `app/setup/config_writer.py` — read/merge/write `.env` **preserving existing keys, comments, and order** (never duplicating a key), and select the `config/models.yaml` provider route (Route A `github_copilot` vs Route B `github_models`). No prompts, no network — just the deterministic file surface the wizard calls.
+  - *Validate:* `tests/test_setup_config_writer.py` — writing a key round-trips; unrelated keys/comments preserved; re-writing an existing key updates it **in place** (idempotent, no duplicate).
+- [ ] **T9.2 — Interactive prompt helpers (injectable I/O).** `app/setup/prompts.py` — `ask` / `confirm` / `secret` helpers with **injectable** input/output streams so the wizard is fully scriptable in tests; secret inputs are **never echoed** and never logged (§12). Each helper takes a **current value**: when one already exists it's shown (secrets **masked**) and offered as the default, so pressing Enter **keeps** it.
+  - *Validate:* test drives each helper with scripted input; a secret answer never appears in captured output; an empty answer keeps the supplied current value.
+- [ ] **T9.3 — AI-provider setup step.** Choose **Route A** — GitHub Copilot **device-flow login** (reuse `auth.py` / `app.cli.login`, the OpenClaw/Hermes flow: print the `user_code` + `https://github.com/login/device`, poll, then confirm `get_bearer()` works) — or **Route B** — a GitHub Models **PAT** captured into `.env`. Write the matching `models.yaml` route (and keep the `embedder` on `github_models`, since Copilot has no embeddings). **Skip when already usable:** if a cached Copilot login (`is_logged_in()`) or a present PAT already satisfies the configured route, report `configured (kept)` and don't re-auth unless `--reconfigure`.
+  - *Validate:* `tests/test_setup_provider.py` — Route A drives the device flow against **mocked** GitHub endpoints (no network) and writes the `github_copilot` route; Route B stores the PAT + writes the `github_models` route; an **already-logged-in / token-present** run skips auth (no device-flow call) and leaves config unchanged.
+- [ ] **T9.4 — Telegram setup step.** Capture `TELEGRAM_BOT_TOKEN` (from **@BotFather**) into `.env`; optionally verify it with a `getMe` Bot API call (skippable so setup stays offline). Briefly explain creating the bot + starting a chat. **Skip when already set:** an existing `TELEGRAM_BOT_TOKEN` is kept by default (offer to re-verify, not to re-enter) unless `--reconfigure`.
+  - *Validate:* test with a **mocked** Bot API — token captured + written; `getMe` success **and** failure handled cleanly; a `--skip-verify`/offline path writes without any call; an **existing-token** run keeps it (no overwrite).
+- [ ] **T9.5 — Owner pairing step (device-flow bootstrap).** Establish the **owner** (§10.1): run the device-flow **owner challenge** (`pair.run_device_flow_challenge`, `bootstrap=True`) to bind the owner GitHub login, **and/or** mint a host one-time code for the chat `/pair <code>` flow. Afterward the Telegram allowlist admits only the owner. **Skip when already established:** if an owner login is already set (DB or `OWNER_GITHUB_LOGIN`), report `configured (kept)` and offer only to **mint a fresh pairing code**, not to re-bootstrap, unless `--reconfigure`.
+  - *Validate:* test binds the owner via the **mocked** device flow; minting a host code lists it; an **owner-already-established** run skips the challenge.
+- [ ] **T9.6 — `setup` wizard command + `--check`.** `python -m app.cli.setup` runs the steps in order, **idempotent + skip-existing by default** (a step that detects working config reports `configured (kept)` and is skipped; only **missing** steps prompt), and ends by calling `verify --dry-run`. `--reconfigure[=step]` forces a re-ask of all/one step (the only way to replace working config); `--check` only **reports** what is configured vs missing (no changes, no network).
+  - *Validate:* `tests/test_setup.py` — a full wizard run with **all** I/O + network mocked writes `.env` + `models.yaml` and ends green on `verify --dry-run`; a **re-run with everything already configured makes no changes + asks nothing** (pure skip); `--reconfigure` re-asks; `--check` reports status without writing.
+- [ ] **T9.7 — `scripts/setup.sh` (env + app, one command).** A thin wrapper, run **from inside an existing checkout**: it runs `scripts/setup-env.sh` (venv + pinned deps) then `python -m app.cli.setup` — so once the repo is cloned, a single command reaches a runnable app. It performs **no git operations** (cloning the repo is a prerequisite, not setup's job). The Python wizard (T9.1–T9.6) carries the real test coverage; the shell wrapper stays logic-light (a documented smoke).
+  - *Validate:* documented smoke — `./scripts/setup.sh` in an existing checkout reaches the wizard; no `git` invocation; no new untested logic in shell.
+- ✅ **Checkpoint P9** — an existing checkout reaches **configured + verified** via one guided `setup` command; no hand-editing of `.env` / `models.yaml`, and no git operations.
+
+---
+
+## P10 — Web app: FastAPI + dashboard (§11)
 
 > Goal: read-only-first dashboard surfacing live state and generated data.
 
-- [ ] **T9.1 — FastAPI app + health.** `app/web/main.py` over the same repos/services; `/healthz`.
+- [ ] **T10.1 — FastAPI app + health.** `app/web/main.py` over the same repos/services; `/healthz`.
   - *Validate:* `tests/test_web_health.py` via `TestClient`.
-- [ ] **T9.2 — Requests API + page.** Live job→plan→phase→task tree + steps/ai_calls.
+- [ ] **T10.2 — Requests API + page.** Live job→plan→phase→task tree + steps/ai_calls.
   - *Validate:* test: seeded request renders via the API.
-- [ ] **T9.3 — System API.** CPU/mem/disk (host-metrics service) + model usage aggregated from `ai_calls`.
+- [ ] **T10.3 — System API.** CPU/mem/disk (host-metrics service) + model usage aggregated from `ai_calls`.
   - *Validate:* test: usage aggregation matches seeded `ai_calls`.
-- [ ] **T9.4 — Reports & Data Products API + Refresh-now (manual path).** List products + run history; `Refresh now` re-invokes generator skills via code (the **manual** refresh path; scheduled firing is T9.7).
+- [ ] **T10.4 — Reports & Data Products API + Refresh-now (manual path).** List products + run history; `Refresh now` re-invokes generator skills via code (the **manual** refresh path; scheduled firing is T10.7).
   - *Validate:* test: refresh triggers a deterministic run + a new `reports` row.
-- [ ] **T9.5 — Settings: paired accounts.** Pair/revoke from the web (calls P7).
+- [ ] **T10.5 — Settings: paired accounts.** Pair/revoke from the web (calls P7).
   - *Validate:* test: revoke flips `user_identities.state`.
-- [ ] **T9.6 — Minimal React/Vite shell (optional).** Lightweight dashboard hitting the APIs. *(Confirm scope at review.)*
+- [ ] **T10.6 — Minimal React/Vite shell (optional).** Lightweight dashboard hitting the APIs. *(Confirm scope at review.)*
   - *Validate:* build succeeds; one page renders seeded data.
-- [ ] **T9.7 — Scheduler runner (scheduled auto-refresh).** `app/scheduler/runner.py` — find **due** `schedules` (cron / `next_run_at`), fire each as a **normal request/job** (§11.1), advance `last_run_at`/`next_run_at`, and write a `reports` row per run. This is the **scheduled** path; T9.4 is the **manual** path (same generator skills).
+- [ ] **T10.7 — Scheduler runner (scheduled auto-refresh).** `app/scheduler/runner.py` — find **due** `schedules` (cron / `next_run_at`), fire each as a **normal request/job** (§11.1), advance `last_run_at`/`next_run_at`, and write a `reports` row per run. This is the **scheduled** path; T10.4 is the **manual** path (same generator skills).
   - *Validate:* `tests/test_scheduler.py` — a due schedule fires once, advances `next_run_at`, writes a `reports` row; a not-yet-due one does **not** fire.
-- ✅ **Checkpoint P9** — dashboard shows requests, system, and data products; products refresh both **on schedule** and **on demand**.
+- ✅ **Checkpoint P10** — dashboard shows requests, system, and data products; products refresh both **on schedule** and **on demand**.
 
 ---
 
 ## Cross-cutting (apply within the relevant phase, not as big-bang)
-- **Schedules & proactive data products (§11.1):** land the `schedules` table in P1, the generator-skill pipeline in P5/P6, and the scheduler trigger + `Refresh now` in P9.
+- **Schedules & proactive data products (§11.1):** land the `schedules` table in P1, the generator-skill pipeline in P5/P6, and the scheduler trigger + `Refresh now` in P10.
 - **Template-requirement validation (anti-hallucination):** every AI-facing role — **explicitly including the experts (Company Expert, Plan Expert)** — must validate the model reply against its template's declared response schema (required fields, correct types, **no extra/invented fields**) before using it; a reply that doesn't meet the requirement is repaired or escalated, never acted on (§6D, §7). Enforced centrally by the advisor wrapper (P3) and inherited by every role that calls it (P4, P6).
 - **Cited-URL existence verification (anti-hallucination):** any **URL** carried in an answer's citations is **deterministically verified to exist** (resolved + reachable) before the answer is accepted — the experts access the cited URLs to confirm they're real; a fabricated/unreachable URL fails validation (repair → escalate). The check is **SSRF-guarded** (only `http`/`https`; rejects private/loopback/link-local/reserved targets) since the URLs are AI-proposed (§6D, §7.1). Centralized in the advisor's answer path (P3) and reused by the experts' report review (P6). **Configurable via the `verify_citation_urls` policy knob (default `true`):** our deterministic fetch can hit **false negatives** where anti-crawler defenses (CAPTCHA, JS/bot challenges, paywalls) block a *real* page an AI/browser could open, so the check can be disabled in `config/policies.yaml`; to be **hardened later** (search-API cross-check / headless render) rather than left strict-only.
 - **Audit everywhere:** every AI call → `ai_calls`; every skill → `steps`; every routing hop → `role_messages` (built into P2–P4).
@@ -323,7 +348,7 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 1. **Models config shape — decide before P3.** Keep the current single `config/models.yaml` (roles+providers), or migrate to the spec's `config/models/` folder + `model-bindings.yaml` (§7.0)? This **blocks P3** (templates, per-agent-role overrides, provider selection all key off it) and churns later if changed mid-stream. *(Recommend: keep the single file through P6; add `model-bindings.yaml` only when a per-agent-role override is actually needed.)*
 2. **Per-job concurrency mechanism — DECIDED (2026-06-15): in-process `asyncio` runner, not a child process.** The work is I/O-bound, the durable truth is already folders + DB, and pause/resume/abandon + `/req` status sharing are far simpler in one address space; `asyncio` `cancel()` also gives clean cooperative abandon that OS threads can't. Isolation is **logical** (own `JobContext` + folder + inbox); a CPU-bound *skill* can be offloaded to a `ProcessPoolExecutor` if ever needed. Spec §6A/§6B updated to match. *(Revisit only if hard fault isolation / force-kill becomes necessary; the recovery contract makes that promotion cheap.)*
 3. **`sqlite-vec` dependency** for vectors (P5.2) — **DECIDED (2026-06-15): pure-Python first, no `sqlite-vec`.** Vectors are stored as float32 blobs in the existing `embeddings` table and searched with deterministic brute-force cosine (`app/memory/vectors.py`), so the suite stays fully offline + hash-pinned with **no new dependency**. The `vector_search` surface is deliberately small so a `sqlite-vec` (ANN) backend can replace the internals later — revisit only when the hot set grows large enough that brute-force latency matters.
-4. **Web frontend scope** (P9.6) — full React/Vite now, or REST + a minimal HTML page until later?
+4. **Web frontend scope** (P10.6) — full React/Vite now, or REST + a minimal HTML page until later?
 5. **Test doubles for GitHub/Bing/Telegram** — confirm we mock all external HTTP in unit tests (no live calls in CI). *(Recommend: yes.)* **Implemented (2026-06-15):** the default `pytest` run is fully offline (a `conftest` guard blocks real sockets); a separate **opt-in** suite marked `integration` (`tests/test_live_integration.py`) calls a **real** model but is **deselected by default** (`addopts = -m 'not integration'`) and **skips** without a configured token — so CI stays offline while `python -m pytest -m integration` exercises a live model on demand.
 6. **Phase ordering** — OK to defer auth/pairing (P7) until after the CLI core (P4–P6), or do you want pairing earlier?
 7. **Cited-URL verification strictness — default ON (2026-06-15).** The deterministic existence check ships **enabled** (`verify_citation_urls: true`), but our fetcher can false-negative on pages guarded by **anti-crawler defenses** (CAPTCHA, JS/bot challenges, paywalls, geofencing) that an AI/browser could open — so it's **disable-able in `config/policies.yaml`**. Planned **hardening (later phase, alongside `web.fetch`):** treat ambiguous/blocked responses as a soft-pass, cross-check existence via the search API, and/or render headless before deciding; revisit whether the default should stay on. *(Open: which hardening lands first, and does the default flip once it's robust?)*
