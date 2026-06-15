@@ -29,22 +29,29 @@ import re
 import sqlite3
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from app.advisor.citations import UrlVerifier, http_url_exists, unresolved_citation_urls
 from app.advisor.providers import AIProvider, CompletionRequest, CompletionResponse
 from app.advisor.redaction import redact_text
 from app.advisor.schemas import Analysis, AnswerDraft, Triage
 from app.advisor.templates import Template, load_template
+from app.config.policies import get_policies
 from app.storage.repos import ai_calls as ai_calls_repo
 
 T = TypeVar("T", bound=BaseModel)
 
 # Provider selector: maps a model-role ("triage"/"planner"/"drafter") to a provider.
 ProviderResolver = Callable[[str], AIProvider]
+
+# A post-parse semantic check: returns a list of problems ("" = clean) for a
+# structurally-valid reply (e.g. cited URLs that don't exist). An empty list
+# means the reply passes; a non-empty list triggers repair/escalate.
+PostValidator = Callable[[BaseModel], list[str]]
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*?)\n```$", re.DOTALL)
 
@@ -92,6 +99,25 @@ def _try_parse(text: str, schema: type[T]) -> T | None:
         return None
 
 
+def _validate(
+    text: str, schema: type[T], post_validate: PostValidator | None
+) -> tuple[T | None, list[str]]:
+    """Strict parse + optional semantic check.
+
+    Returns ``(value, [])`` when the reply both parses into ``schema`` and
+    passes ``post_validate``; otherwise ``(None, problems)`` where ``problems``
+    names the semantic failures (empty for a pure structural failure).
+    """
+    parsed = _try_parse(text, schema)
+    if parsed is None:
+        return None, []
+    if post_validate is not None:
+        problems = post_validate(parsed)
+        if problems:
+            return None, problems
+    return parsed, []
+
+
 def _tokens(resp: CompletionResponse) -> int | None:
     usage = resp.raw.get("usage") if isinstance(resp.raw, dict) else None
     if isinstance(usage, dict):
@@ -101,8 +127,16 @@ def _tokens(resp: CompletionResponse) -> int | None:
     return None
 
 
-def _repair_instruction(template: Template) -> str:
-    """The single corrective nudge sent on a failed parse."""
+def _repair_instruction(template: Template, problems: list[str] | None = None) -> str:
+    """The single corrective nudge sent on a failed parse or semantic check."""
+    if problems:
+        joined = "; ".join(problems)
+        return (
+            f"Your previous response had these problems: {joined}. Reply again "
+            "with a SINGLE JSON object that exactly matches the required schema "
+            f"for {template.id}. Only cite sources you are certain exist. "
+            "JSON only — no prose, no code fences."
+        )
     return (
         "Your previous response was not valid. Reply again with a SINGLE JSON "
         "object that exactly matches the required schema for "
@@ -117,6 +151,13 @@ class Advisor:
     resolve_provider: ProviderResolver
     conn: sqlite3.Connection
     templates_dir: Path | None = None
+    # Cited-URL existence check (anti-hallucination, §7.1). Injectable so tests
+    # run offline; defaults to the real, SSRF-guarded HTTP verifier.
+    verify_url: UrlVerifier = http_url_exists
+    # Whether to run that check at all. Defaults from the `verify_citation_urls`
+    # policy knob (default on) so it can be disabled in config where our
+    # deterministic fetch is blocked by anti-crawler defenses (§7.1).
+    verify_citations: bool = field(default_factory=lambda: get_policies().verify_citation_urls)
 
     # -- public typed methods (T3.6-T3.8) -----------------------------------
 
@@ -180,6 +221,8 @@ class Advisor:
 
         No deterministic fallback: an answer must carry a real citation, so an
         unvalidatable draft **escalates** (raises) rather than fabricating one.
+        Any cited **URL** is verified to exist (§7.1); a fabricated/unreachable
+        link fails validation the same way a bad schema does.
         """
         return self._run(
             role="drafter",
@@ -189,7 +232,23 @@ class Advisor:
             request_id=request_id,
             job_id=job_id,
             fallback=None,
+            post_validate=self._verify_answer_citations,
         )
+
+    def _verify_answer_citations(self, draft: BaseModel) -> list[str]:
+        """Flag any cited URL that doesn't exist (anti-hallucination, §7.1).
+
+        Skipped entirely when ``verify_citations`` is off (config knob
+        ``verify_citation_urls``) — cited URLs are then kept as provenance but
+        not fetched, the documented escape hatch for anti-crawler false negatives.
+        """
+        if not self.verify_citations:
+            return []
+        assert isinstance(draft, AnswerDraft)
+        return [
+            f"cited URL could not be verified to exist: {url}"
+            for url in unresolved_citation_urls(draft.citations, self.verify_url)
+        ]
 
     # -- core pipeline (T3.3-T3.5) ------------------------------------------
 
@@ -203,6 +262,7 @@ class Advisor:
         request_id: int,
         job_id: int | None,
         fallback: Callable[[], T] | None,
+        post_validate: PostValidator | None = None,
     ) -> T:
         template = load_template(template_name, templates_dir=self.templates_dir)
         # A role may never act on an unvalidated reply: refuse a template that
@@ -215,7 +275,7 @@ class Advisor:
 
         started = time.monotonic()
         value, status, last_response, tokens = self._call_with_repair(
-            provider, prompt, schema, template
+            provider, prompt, schema, template, post_validate
         )
         latency_ms = int((time.monotonic() - started) * 1000)
 
@@ -248,29 +308,35 @@ class Advisor:
         prompt: str,
         schema: type[T],
         template: Template,
+        post_validate: PostValidator | None = None,
     ) -> tuple[T | None, str, str, int | None]:
-        """One call + at most one repair. Returns (value|None, status, text, tokens)."""
+        """One call + at most one repair. Returns (value|None, status, text, tokens).
+
+        A reply must pass **both** the strict schema parse and the optional
+        ``post_validate`` semantic check (e.g. cited-URL existence) to count as
+        valid; otherwise the corrective instruction names the problems found.
+        """
         messages = [{"role": "user", "content": prompt}]
         resp = provider.complete(
             CompletionRequest(
                 messages=messages, temperature=0.0, response_format={"type": "json_object"}
             )
         )
-        parsed = _try_parse(resp.text, schema)
+        parsed, problems = _validate(resp.text, schema, post_validate)
         if parsed is not None:
             return parsed, "valid", resp.text, _tokens(resp)
 
         # Bounded repair: one more attempt with a corrective instruction.
         repair_messages = messages + [
             {"role": "assistant", "content": resp.text},
-            {"role": "user", "content": _repair_instruction(template)},
+            {"role": "user", "content": _repair_instruction(template, problems)},
         ]
         resp2 = provider.complete(
             CompletionRequest(
                 messages=repair_messages, temperature=0.0, response_format={"type": "json_object"}
             )
         )
-        parsed2 = _try_parse(resp2.text, schema)
+        parsed2, _ = _validate(resp2.text, schema, post_validate)
         if parsed2 is not None:
             return parsed2, "repaired", resp2.text, _tokens(resp2)
 

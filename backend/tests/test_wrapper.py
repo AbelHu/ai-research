@@ -49,6 +49,15 @@ VALID_ANSWER = json.dumps(
 )
 MALFORMED = "sorry, I can't produce JSON right now"
 ZERO_CITATION_ANSWER = json.dumps({"answer": "Paris.", "citations": [], "confidence": 0.5})
+# An answer citing a URL — the URL must be deterministically verified to exist
+# (anti-hallucination, §7.1).
+ANSWER_WITH_URL = json.dumps(
+    {
+        "answer": "Paris is the capital of France.",
+        "citations": [{"ref": "web:1", "url": "https://real.example/france"}],
+        "confidence": 0.9,
+    }
+)
 # Valid-looking triage with an invented extra field — a hallucination the strict
 # template requirement must reject (design-spec §6D/§7).
 HALLUCINATED_TRIAGE = json.dumps(
@@ -246,3 +255,116 @@ def test_template_without_requirement_is_rejected(tmp_path, db) -> None:
     # Guard fires before the model is called and before any audit row is written.
     assert provider.calls == []
     assert ai_calls_repo.list_ai_calls(conn, request_id) == []
+
+
+# --- cited-URL existence verification (anti-hallucination, §7.1) ------------
+
+
+def test_answer_with_existing_cited_url_is_accepted(db) -> None:
+    conn, request_id = db
+    provider = FakeProvider(ANSWER_WITH_URL)
+    seen: list[str] = []
+
+    def _verify(url: str) -> bool:
+        seen.append(url)
+        return True  # the URL exists
+
+    advisor = Advisor(resolve_provider=lambda role: provider, conn=conn, verify_url=_verify)
+
+    result = advisor.answer(text="capital of France?", request_id=request_id)
+
+    assert result.citations[0].url == "https://real.example/france"
+    assert seen == ["https://real.example/france"]  # the cited URL was checked
+    row = ai_calls_repo.list_ai_calls(conn, request_id)[0]
+    assert row["validation_status"] == "valid"
+
+
+def test_answer_with_hallucinated_url_is_rejected_and_escalates(db) -> None:
+    conn, request_id = db
+    provider = FakeProvider(ANSWER_WITH_URL)  # repeats -> repair also has the bad URL
+
+    # Verifier reports the cited URL does NOT exist -> fabricated link.
+    advisor = Advisor(
+        resolve_provider=lambda role: provider, conn=conn, verify_url=lambda url: False
+    )
+
+    with pytest.raises(AdvisorValidationError):
+        advisor.answer(text="capital of France?", request_id=request_id)
+
+    assert len(provider.calls) == 2  # initial + one repair, both rejected
+    row = ai_calls_repo.list_ai_calls(conn, request_id)[0]
+    assert row["validation_status"] == "failed"
+
+
+def test_answer_with_bad_url_repairs_to_a_real_one(db) -> None:
+    conn, request_id = db
+    bad = json.dumps(
+        {
+            "answer": "Paris.",
+            "citations": [{"ref": "web:1", "url": "https://fake.example/nope"}],
+            "confidence": 0.7,
+        }
+    )
+    provider = FakeProvider([bad, ANSWER_WITH_URL])  # repair returns a real URL
+
+    advisor = Advisor(
+        resolve_provider=lambda role: provider,
+        conn=conn,
+        verify_url=lambda url: url == "https://real.example/france",
+    )
+
+    result = advisor.answer(text="capital of France?", request_id=request_id)
+
+    assert result.citations[0].url == "https://real.example/france"
+    assert len(provider.calls) == 2
+    row = ai_calls_repo.list_ai_calls(conn, request_id)[0]
+    assert row["validation_status"] == "repaired"
+
+
+def test_answer_without_url_citation_skips_verification(db) -> None:
+    conn, request_id = db
+    provider = FakeProvider(VALID_ANSWER)  # cites memory:12, no URL
+    calls: list[str] = []
+
+    advisor = Advisor(
+        resolve_provider=lambda role: provider,
+        conn=conn,
+        verify_url=lambda url: calls.append(url) or True,
+    )
+
+    result = advisor.answer(text="capital of France?", request_id=request_id)
+
+    assert result.citations[0].ref == "memory:12"
+    assert calls == []  # no URL to verify -> verifier never invoked
+
+
+def test_url_verification_can_be_disabled_by_config(db) -> None:
+    conn, request_id = db
+    provider = FakeProvider(ANSWER_WITH_URL)  # cites a URL
+    calls: list[str] = []
+
+    # verify_citations off (the `verify_citation_urls: false` config path): the
+    # cited URL is kept as provenance but never fetched, so even a verifier that
+    # would reject everything is never consulted and the answer is accepted.
+    advisor = Advisor(
+        resolve_provider=lambda role: provider,
+        conn=conn,
+        verify_url=lambda url: calls.append(url) or False,
+        verify_citations=False,
+    )
+
+    result = advisor.answer(text="capital of France?", request_id=request_id)
+
+    assert result.citations[0].url == "https://real.example/france"
+    assert calls == []  # check disabled -> verifier never invoked
+    assert len(provider.calls) == 1  # accepted on the first reply, no repair
+    row = ai_calls_repo.list_ai_calls(conn, request_id)[0]
+    assert row["validation_status"] == "valid"
+
+
+def test_url_verification_on_by_default(db) -> None:
+    conn, request_id = db
+    provider = FakeProvider(VALID_ANSWER)
+    # Default construction (no verify_citations passed) honors the shipped knob.
+    advisor = Advisor(resolve_provider=lambda role: provider, conn=conn)
+    assert advisor.verify_citations is True

@@ -25,3 +25,11 @@ junior_session_idle_minutes: 15
 
 # How often progress is surfaced to the user: "none" | "phase" | "task".
 progress_updates: phase
+
+# Verify that any URL cited in an answer actually exists before the answer is
+# accepted (anti-hallucination, §7.1). Default on. Disable only if our
+# deterministic existence check is blocked by anti-crawler defenses (CAPTCHA,
+# JS-rendered pages, paywalls) that an AI/browser could pass; with it off, cited
+# URLs are kept as provenance but not fetched. To be hardened later (e.g.
+# search-API cross-check / headless render).
+verify_citation_urls: true

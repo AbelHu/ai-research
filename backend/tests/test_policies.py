@@ -33,6 +33,7 @@ def test_defaults_match_spec() -> None:
     assert p.max_concurrent_jobs == 3
     assert p.junior_session_idle_minutes == 15
     assert p.progress_updates == "phase"
+    assert p.verify_citation_urls is True  # cited-URL check ships ON (§7.1)
 
 
 def test_shipped_policies_load_to_defaults() -> None:
@@ -55,6 +56,13 @@ def test_partial_override_wins(tmp_path: Path) -> None:
     assert cfg.progress_updates == "task"
     # Unspecified keys keep their defaults.
     assert cfg.max_phase_declines == 3
+
+
+def test_verify_citation_urls_can_be_disabled(tmp_path: Path) -> None:
+    cfg = load_policies(_write(tmp_path, "verify_citation_urls: false\n"))
+    assert cfg.verify_citation_urls is False
+    # Other knobs keep their defaults.
+    assert cfg.max_concurrent_jobs == 3
 
 
 def test_rejects_unknown_key(tmp_path: Path) -> None:

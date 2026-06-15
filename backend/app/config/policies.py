@@ -38,6 +38,12 @@ class Policies(BaseModel):
     max_concurrent_jobs: int = Field(default=3, ge=1)
     junior_session_idle_minutes: int = Field(default=15, ge=1)
     progress_updates: ProgressUpdates = "phase"
+    # Verify that any URL cited in an answer actually exists before the answer
+    # is accepted (anti-hallucination, §7.1). Default on. May be disabled where
+    # our deterministic fetch is blocked by anti-crawler defenses (CAPTCHA,
+    # JS/bot challenges, paywalls) that an AI/browser could pass — a first cut to
+    # be hardened later, not a permanent limitation.
+    verify_citation_urls: bool = True
 
 
 def load_policies(path: Path | None = None) -> Policies:
