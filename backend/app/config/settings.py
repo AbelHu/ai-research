@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     bing_search_key: Secret | None = None
     openai_api_key: Secret | None = None
 
+    # Telegram bot (channel adapter, §10). The bot token authenticates Bot API
+    # calls; the optional webhook secret verifies inbound webhook requests.
+    telegram_bot_token: Secret | None = None
+    telegram_webhook_secret: Secret | None = None
+
+    # The owner's GitHub login (§10.1). Optional pin: when set, a chat pairing
+    # must approve the device flow as exactly this account to be admitted as
+    # owner. When unset, the owner login is established by the host-side pairing.
+    owner_github_login: str | None = None
+
     data_dir: Path = REPO_ROOT / "data"
     models_config_path: Path = DEFAULT_MODELS_CONFIG
 

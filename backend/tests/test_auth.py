@@ -17,6 +17,7 @@ from app.advisor.auth import (
     ACCESS_TOKEN_URL,
     COPILOT_TOKEN_URL,
     DEVICE_CODE_URL,
+    GITHUB_USER_URL,
     AuthDenied,
     AuthExpired,
     GitHubCopilotAuth,
@@ -35,6 +36,7 @@ class FakeGitHub:
         self.copilot_status = 200
         self.copilot_token = "copilot-abc"
         self.copilot_expires_at = 9_999_999_999
+        self.user_login = "octocat"
         self.requests: list[httpx.Request] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -65,6 +67,8 @@ class FakeGitHub:
                 200,
                 json={"token": self.copilot_token, "expires_at": self.copilot_expires_at},
             )
+        if url == GITHUB_USER_URL:
+            return httpx.Response(200, json={"login": self.user_login})
         return httpx.Response(404)  # pragma: no cover
 
 
@@ -213,3 +217,12 @@ def test_find_existing_token_precedence_and_ghp_ignored() -> None:
     # A classic ghp_ token is not usable for the Copilot exchange → ignored.
     assert find_existing_oauth_token({"GITHUB_TOKEN": "ghp_classic"}.get) is None
     assert find_existing_oauth_token({}.get) is None
+
+
+def test_fetch_github_login(fake_gh, tmp_path) -> None:
+    fake_gh.user_login = "abel"
+    auth = _auth(fake_gh, tmp_path)
+    assert auth.fetch_github_login("gho_realtoken") == "abel"
+    # The /user call carried the token (used only to verify, then discarded).
+    user_calls = [r for r in fake_gh.requests if str(r.url) == GITHUB_USER_URL]
+    assert user_calls and user_calls[0].headers["Authorization"] == "token gho_realtoken"

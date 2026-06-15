@@ -38,6 +38,7 @@ DEVICE_CODE_URL = "https://github.com/login/device/code"
 ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
 COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
 COPILOT_API_BASE = "https://api.githubcopilot.com"
+GITHUB_USER_URL = "https://api.github.com/user"
 
 # Public OAuth client id used by the GitHub Copilot editor integrations for the
 # device flow (no app registration / client secret needed). Overridable via env.
@@ -222,6 +223,32 @@ class GitHubCopilotAuth:
             resp.raise_for_status()
             data = resp.json()
         return CopilotToken(token=Secret(data["token"]), expires_at=int(data["expires_at"]))
+
+    # --- owner identity (pairing, §10.1) ------------------------------------
+
+    def fetch_github_login(self, oauth_token: str) -> str:
+        """Read the GitHub ``login`` for a ``gho_`` token (``GET /user``).
+
+        Used by the pairing flow to verify a chat user approved the device flow
+        **as the owner** (§10.1). The token is used only for this check and
+        discarded by the caller — never cached (the chat user isn't logging in
+        for LLM use).
+        """
+        with self._client_factory() as client:
+            resp = client.get(
+                GITHUB_USER_URL,
+                headers={
+                    "Authorization": f"token {oauth_token}",
+                    "Accept": "application/json",
+                    "User-Agent": USER_AGENT,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        login = data.get("login")
+        if not login:
+            raise AuthError("GitHub /user returned no login")
+        return str(login)
 
     # --- cached-credential lifecycle ----------------------------------------
 

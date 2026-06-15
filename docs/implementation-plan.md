@@ -263,9 +263,9 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
   - *Validate:* test: provider builds + sets Copilot headers (mocked transport).
 - [x] **T7.3 — `login` CLI.** `app/cli/login.py` runs the device flow, prints the user code.
   - *Validate:* manual smoke documented; unit test drives the flow with mocked endpoints.
-- [ ] **T7.4 — Owner identity + allowlist check.** Gateway helper: resolve `(channel, channel_user_id)` → only `paired` admitted; refusals audited + rate-limited (§10.1).
+- [x] **T7.4 — Owner identity + allowlist check.** Gateway helper: resolve `(channel, channel_user_id)` → only `paired` admitted; refusals audited + rate-limited (§10.1).
   - *Validate:* `tests/test_allowlist.py` — paired passes, unpaired refused + audited.
-- [ ] **T7.5 — `pair` CLI + device-flow challenge.** `app/cli/pair.py` — mint/list/revoke one-time codes + the owner device-flow challenge; writes `user_identities` binding.
+- [x] **T7.5 — `pair` CLI + device-flow challenge.** `app/cli/pair.py` — mint/list/revoke one-time codes + the owner device-flow challenge; writes `user_identities` binding.
   - *Validate:* test: pair via host code binds owner; non-owner login refused.
 - ✅ **Checkpoint P7** — only the paired owner can drive the system.
 
@@ -275,14 +275,15 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 > Goal: a real chat message in, a validated answer out — through the allowlist.
 
-- [ ] **T8.1 — `ChannelAdapter` protocol + canonical messages.** `app/channels/adapter.py` (`InboundMessage`/`OutboundMessage`, `parse_inbound`/`send`/`verify`).
+- [x] **T8.1 — `ChannelAdapter` protocol + canonical messages.** `app/channels/adapter.py` (`InboundMessage`/`OutboundMessage`, `parse_inbound`/`send`/`verify`).
   - *Validate:* test: a raw payload → canonical `InboundMessage`.
-- [ ] **T8.2 — Telegram adapter (parse + send).** `app/channels/telegram.py` — Bot API; signature/secret verify.
+- [x] **T8.2 — Telegram adapter (parse + send).** `app/channels/telegram.py` — Bot API; signature/secret verify.
   - *Validate:* test with a recorded Telegram update fixture (no network).
-- [ ] **T8.3 — Gateway ingress wiring.** Connect adapter → allowlist (P7) → PM control loop (P4). Long-poll runner.
+- [x] **T8.3 — Gateway ingress wiring.** Connect adapter → allowlist (P7) → PM control loop (P4). Long-poll runner (`app/cli/telegram.py`).
   - *Validate:* test: fake inbound from a paired user → answer enqueued; unpaired → refused.
-- [ ] **T8.4 — `pair` over chat (`/pair <code>` + unpaired challenge).** PM surfaces the device code in chat.
-  - *Validate:* test: unpaired sender gets a challenge, not a request.
+- [x] **T8.4 — `pair` over chat (`/pair <code>` + unpaired hint).** The chat side of host-code pairing: `/pair <code>` binds the sender to the owner; an unpaired non-`/pair` sender gets a single "pair first" hint (rate-limited, audited).
+  - *Validate:* `tests/test_ingress.py` — `/pair <valid>` binds + confirms; unpaired sender refused with a hint, no request created.
+  - *Deferred follow-up:* surfacing a **device-flow** `user_code` in chat with background owner-verify + bind (needs a per-chat pending-challenge poller); the host one-time code path already makes Telegram pairing fully testable.
 - ✅ **Checkpoint P8** — Telegram round-trip works for the owner only.
 
 ---

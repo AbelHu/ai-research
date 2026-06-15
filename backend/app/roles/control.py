@@ -21,10 +21,12 @@ from app.advisor.wrapper import Advisor
 from app.roles import analyzer, boss, junior, pm
 from app.roles.envelope import Action, Role, RoleMessage
 from app.storage.repos import role_messages as role_messages_repo
+from app.storage.repos.identities import ensure_owner
 from app.storage.repos.requests import Request
 
-# Hardcoded single owner for the CLI harness (P4). Real pairing arrives in P7.
-OWNER_DISPLAY_NAME = "owner"
+# Owner resolution lives in the identities repo (§10.1); re-exported here so the
+# P4 callers (`run_ask`, the `ask` CLI, tests) keep importing it from control.
+__all__ = ["AskOutcome", "AskStatus", "ensure_owner", "run_ask"]
 
 AskStatus = Literal["answered", "unanswered", "needs_clarification", "planned", "rejected"]
 
@@ -39,19 +41,6 @@ class AskOutcome:
     answer: AnswerDraft | None = None
     clarify: list[str] | None = None
     delivery: str | None = None  # PM-formatted user message (answered path)
-
-
-def ensure_owner(conn) -> int:
-    """Return the single owner user's id, creating it on first use (P4)."""
-    row = conn.execute("SELECT id FROM users WHERE is_owner = 1 ORDER BY id LIMIT 1").fetchone()
-    if row is not None:
-        return int(row["id"])
-    with conn:
-        cur = conn.execute(
-            "INSERT INTO users (display_name, is_owner) VALUES (?, 1)",
-            (OWNER_DISPLAY_NAME,),
-        )
-    return int(cur.lastrowid)
 
 
 def _emit_boss(

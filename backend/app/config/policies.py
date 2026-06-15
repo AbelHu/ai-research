@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_POLICIES_CONFIG = REPO_ROOT / "config" / "policies.yaml"
 
 ProgressUpdates = Literal["none", "phase", "task"]
+UnpairedReply = Literal["pair_hint", "silent"]
 
 
 class MemoryPolicy(BaseModel):
@@ -79,6 +80,14 @@ class Policies(BaseModel):
     # code/skills (design-spec §5/§6B). Default on: generated code stays inert
     # until explicitly confirmed; deactivating this would auto-activate (unsafe).
     confirm_generated_code: bool = True
+    # Gateway allowlist (§10.1). A chat bot is publicly reachable, so the Gateway
+    # refuses every unpaired sender. `unpaired_reply` chooses whether to send a
+    # single "pair first" hint or stay silent; refusals are rate-limited per
+    # sender to resist probing/flooding (cap N actioned refusals per window —
+    # beyond that they're dropped without a reply or a new audit row).
+    unpaired_reply: UnpairedReply = "pair_hint"
+    refusal_rate_limit_max: int = Field(default=3, ge=1)
+    refusal_rate_limit_window_seconds: int = Field(default=60, ge=1)
     # Deterministic memory weighting / TTL knobs (§9.1).
     memory: MemoryPolicy = Field(default_factory=MemoryPolicy)
 
