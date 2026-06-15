@@ -2,9 +2,10 @@
 
 Each step **detects existing configuration and skips by default** (never
 clobbering a working machine), reports a `StepResult`, and only prompts to fill a
-gap. Every external seam (device-flow login, Telegram ``getMe``, owner
-establishment, code minting) is **injectable** so the steps are unit-tested fully
-offline; the defaults wire the real implementations.
+gap. The external seams (device-flow login, Telegram ``getMe``) are **injectable**
+so the steps are unit-tested fully offline; the defaults wire the real
+implementations. Chat pairing is request-and-approve at runtime (no GitHub), so
+its step is purely informational.
 """
 
 from __future__ import annotations
@@ -149,51 +150,33 @@ def telegram_step(
 # --- T9.5: owner pairing ----------------------------------------------------
 
 
-def _default_establish_owner(conn: sqlite3.Connection, prompter: Prompter) -> str | None:
-    """Run the real device-flow owner challenge; return the established login."""
-    from app.advisor.auth import AuthError, GitHubCopilotAuth
-    from app.gateway.pairing import establish_owner
-
-    def on_prompt(device) -> None:
-        prompter.say(f"  Open {device.verification_uri} and enter code: {device.user_code}")
-
-    try:
-        return establish_owner(conn, GitHubCopilotAuth(), on_prompt=on_prompt)
-    except AuthError:
-        return None
-
-
-def _default_mint_code(conn: sqlite3.Connection) -> str:
-    """Mint a host one-time pairing code; return the plaintext (shown once)."""
-    from app.storage.repos import pairing_codes as pairing_codes_repo
-
-    return pairing_codes_repo.mint_code(conn).code
+# --- T9.5: chat pairing -----------------------------------------------------
 
 
 def pairing_step(
     conn: sqlite3.Connection,
     prompter: Prompter,
     *,
-    settings=None,
-    establish_fn: Callable[[sqlite3.Connection, Prompter], str | None] = _default_establish_owner,
-    mint_fn: Callable[[sqlite3.Connection], str] = _default_mint_code,
     reconfigure: bool = False,
 ) -> StepResult:
-    """Establish the owner (device-flow) and/or mint a host ``/pair`` code (§10.1)."""
+    """Explain chat pairing + ensure the owner record exists (§10.1).
+
+    Pairing is **request-and-approve at runtime** — no GitHub account, no login.
+    Once the bot runs, a user messages it, the bot replies a one-time code, and
+    the operator runs ``pair --approve <code>`` on the trusted console to admit
+    them. So there's nothing to authenticate here: the step just creates the
+    owner record that paired accounts attach to and shows what to do next.
+    """
     from app.storage.repos import identities as identities_repo
 
-    expected = identities_repo.expected_owner_login(conn, settings=settings)
-    if not reconfigure and expected:
-        # Pure skip: an established owner is left untouched and we ask nothing.
-        # (Need a fresh chat code later? `python -m app.cli.pair`.)
-        return StepResult("Owner pairing", KEPT, f"owner={expected}")
+    paired = identities_repo.list_identities(conn, state="paired")
+    if not reconfigure and paired:
+        return StepResult("Pairing", KEPT, f"{len(paired)} account(s) paired")
 
-    if not prompter.confirm("Establish the owner now via GitHub device-flow?", default=True):
-        return StepResult("Owner pairing", MISSING, "skipped")
-    login = establish_fn(conn, prompter)
-    if not login:
-        return StepResult("Owner pairing", MISSING, "owner challenge did not complete")
-    if prompter.confirm("Mint a pairing code for your chat account now?", default=True):
-        code = mint_fn(conn)
-        prompter.say(f"  Pairing code (send `/pair {code}` from your chat account): {code}")
-    return StepResult("Owner pairing", CONFIGURED, f"owner={login}")
+    identities_repo.ensure_owner(conn)
+    prompter.say("Chat pairing (request-and-approve — no account or login needed):")
+    prompter.say("  1. Start the bot:    python -m app.cli.telegram")
+    prompter.say("  2. Message the bot from your chat app — it replies a one-time code.")
+    prompter.say("  3. Approve it here:  python -m app.cli.pair --approve <code>")
+    prompter.say("     The bot then accepts that account's messages (repeat per account).")
+    return StepResult("Pairing", CONFIGURED, "request-and-approve at runtime")

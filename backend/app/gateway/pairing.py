@@ -214,33 +214,3 @@ def run_device_flow_challenge(
         settings=settings,
         bootstrap=bootstrap,
     )
-
-
-def establish_owner(
-    conn: sqlite3.Connection,
-    auth: GitHubCopilotAuth,
-    *,
-    on_prompt: Callable[[DeviceCode], None] | None = None,
-    sleep: Callable[[float], None] = time.sleep,
-) -> str:
-    """Establish the **owner** GitHub login via device flow (setup, T9.5).
-
-    Runs the device-flow owner challenge, reads the approving account's ``login``,
-    and records it on the owner row — **without** binding a chat account (that
-    happens later via ``/pair`` from the channel). The raw token is used only to
-    read the login and then discarded (§10.1). Returns the established login.
-    """
-    device = auth.request_device_code()
-    if on_prompt is not None:
-        on_prompt(device)
-    oauth_token = auth.poll_for_oauth_token(device, sleep=sleep)
-    login = auth.fetch_github_login(oauth_token)
-    identities_repo.set_owner_github_login(conn, login)
-    audit_repo.record_audit(
-        conn,
-        actor="system",
-        action=PAIRED_ACTION,
-        target=f"owner:{login}",
-        payload={"via": "setup_device_flow"},
-    )
-    return login

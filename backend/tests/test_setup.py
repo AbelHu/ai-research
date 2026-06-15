@@ -80,10 +80,13 @@ def models_path(tmp_path):
 
 
 def test_run_setup_pure_skip_asks_nothing(conn, tmp_path, models_path) -> None:
-    # Everything already configured: copilot logged in, telegram token, owner set.
+    # Everything already configured: copilot logged in, telegram token, an account paired.
     env_path = tmp_path / ".env"
     env = EnvFile("TELEGRAM_BOT_TOKEN=existing\n")
-    identities_repo.set_owner_github_login(conn, "octocat")
+    owner_id = identities_repo.ensure_owner(conn)
+    identities_repo.bind_identity(
+        conn, user_id=owner_id, channel="telegram", channel_user_id="42", paired_via="host_code"
+    )
 
     out: list[str] = []
     prompter = Prompter(reader=_Raises(), secret_reader=_Raises(), writer=out.append)
@@ -110,16 +113,12 @@ def test_run_setup_configures_everything(conn, tmp_path, models_path) -> None:
     env_path = tmp_path / ".env"
     env = EnvFile("")
 
-    # provider: choose B + PAT; telegram: token; owner: establish yes, mint no.
+    # provider: choose B + PAT; telegram: token. Pairing is informational (no prompt).
     prompter = Prompter(
-        reader=_Script(["B", "y", "n"]),
+        reader=_Script(["B"]),
         secret_reader=_Script(["ghp_pat", "123:tok"]),
         writer=lambda _m: None,
     )
-
-    def _establish(c, _p):
-        identities_repo.set_owner_github_login(c, "new-owner")
-        return "new-owner"
 
     rc = run_setup(
         conn,
@@ -130,7 +129,6 @@ def test_run_setup_configures_everything(conn, tmp_path, models_path) -> None:
         dry_run_fn=lambda: 0,
         provider_kwargs={"auth": _FakeAuth(False), "getenv": lambda _k: None},
         telegram_kwargs={"verify_fn": lambda t: (True, "mybot")},
-        pairing_kwargs={"establish_fn": _establish},
     )
 
     assert rc == 0
@@ -138,9 +136,9 @@ def test_run_setup_configures_everything(conn, tmp_path, models_path) -> None:
     saved = EnvFile.load(env_path)
     assert saved.get("GITHUB_MODELS_TOKEN") == "ghp_pat"
     assert saved.get("TELEGRAM_BOT_TOKEN") == "123:tok"
-    # models.yaml switched to the PAT route; owner recorded.
+    # models.yaml switched to the PAT route; the owner record exists (no GitHub login).
     assert current_route(models_path) == ROUTE_MODELS
-    assert identities_repo.expected_owner_login(conn) == "new-owner"
+    assert identities_repo.get_owner(conn) is not None
 
 
 def test_run_setup_returns_verify_exit_code(conn, tmp_path, models_path) -> None:
@@ -167,7 +165,8 @@ def test_check_all_missing(conn, models_path) -> None:
     by_name = {r.name: r for r in results}
     assert by_name["AI provider"].status == MISSING
     assert by_name["Telegram"].status == MISSING
-    assert by_name["Owner pairing"].status == MISSING
+    # Pairing is request-and-approve at runtime — informational, never a blocker.
+    assert by_name["Pairing"].status == KEPT
 
 
 def test_check_all_configured(conn, models_path) -> None:

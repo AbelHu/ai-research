@@ -197,35 +197,38 @@ def test_telegram_no_token_is_missing() -> None:
     assert result.status == MISSING
 
 
-# --- T9.5 owner pairing -----------------------------------------------------
+# --- T9.5 chat pairing (informational, request-and-approve, no GitHub) -------
 
 
-def test_pairing_kept_when_owner_established(conn) -> None:
-    identities_repo.set_owner_github_login(conn, "octocat")
+def test_pairing_creates_owner_and_shows_instructions(conn) -> None:
+    prompter, out = _prompter()  # informational: asks nothing
+    result = pairing_step(conn, prompter)
+    assert result.status == CONFIGURED
+    # The owner record now exists; no GitHub login is involved.
+    assert identities_repo.get_owner(conn) is not None
+    # The next-step instructions were shown to the user.
+    text = "\n".join(out)
+    assert "pair --approve" in text
+    assert "app.cli.telegram" in text
+
+
+def test_pairing_kept_when_accounts_paired(conn) -> None:
+    owner_id = identities_repo.ensure_owner(conn)
+    identities_repo.bind_identity(
+        conn, user_id=owner_id, channel="telegram", channel_user_id="42", paired_via="host_code"
+    )
     prompter, _ = _prompter()  # KEPT path asks nothing
     result = pairing_step(conn, prompter)
     assert result.status == KEPT
-    assert "octocat" in result.detail
+    assert "1 account" in result.detail
 
 
-def test_pairing_establishes_owner(conn) -> None:
-    prompter, _ = _prompter(answers=["y", "n"])  # establish yes, mint no
-    result = pairing_step(
-        conn,
-        prompter,
-        establish_fn=lambda c, p: "new-owner",
+def test_pairing_reconfigure_shows_instructions_again(conn) -> None:
+    owner_id = identities_repo.ensure_owner(conn)
+    identities_repo.bind_identity(
+        conn, user_id=owner_id, channel="telegram", channel_user_id="42", paired_via="host_code"
     )
+    prompter, out = _prompter()
+    result = pairing_step(conn, prompter, reconfigure=True)
     assert result.status == CONFIGURED
-    assert "new-owner" in result.detail
-
-
-def test_pairing_decline_is_missing(conn) -> None:
-    prompter, _ = _prompter(answers=["n"])  # decline establishing
-    result = pairing_step(conn, prompter, establish_fn=lambda c, p: "x")
-    assert result.status == MISSING
-
-
-def test_pairing_failed_challenge_is_missing(conn) -> None:
-    prompter, _ = _prompter(answers=["y"])  # agree, but challenge fails
-    result = pairing_step(conn, prompter, establish_fn=lambda c, p: None)
-    assert result.status == MISSING
+    assert "pair --approve" in "\n".join(out)

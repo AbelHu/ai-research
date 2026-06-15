@@ -68,7 +68,7 @@ safe and never clobber working settings):
 |------|--------------|
 | **AI provider** | Choose **Route A** (GitHub Copilot device-flow login) or **Route B** (GitHub Models PAT), and write the matching `config/models.yaml` route. |
 | **Telegram** | Capture `TELEGRAM_BOT_TOKEN` into `.env` (optionally verified via `getMe`). Skip if you only use the CLI. |
-| **Owner** | Establish the **owner** GitHub identity (device-flow challenge) so only you can later drive the chat bot (§10.1). |
+| **Pairing** | Informational only — chat pairing is **request-and-approve at runtime** (no GitHub, no login): once the bot runs, a user messages it, the bot replies a one-time code, and you run `pair --approve <code>` to admit them. See [usage.md](usage.md) §3. |
 
 It ends by running `verify --dry-run`. Useful flags:
 

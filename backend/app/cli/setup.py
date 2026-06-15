@@ -84,7 +84,10 @@ def check(
     else:
         provider_ok = False
 
-    owner = identities_repo.expected_owner_login(conn)
+    # Chat pairing is request-and-approve at runtime (no GitHub) — informational,
+    # never a setup blocker; report how many accounts are currently paired.
+    paired = identities_repo.list_identities(conn, state="paired")
+    pairing_detail = f"{len(paired)} account(s) paired" if paired else "none yet (pair at runtime)"
     return [
         StepResult("AI provider", KEPT if provider_ok else MISSING, f"route={route}"),
         StepResult(
@@ -92,7 +95,7 @@ def check(
             KEPT if env.has_value("TELEGRAM_BOT_TOKEN") else MISSING,
             "bot token",
         ),
-        StepResult("Owner pairing", KEPT if owner else MISSING, f"owner={owner or '—'}"),
+        StepResult("Pairing", KEPT, pairing_detail),
     ]
 
 
