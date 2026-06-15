@@ -107,6 +107,18 @@ _ROUTE_MODELS_DEFAULTS = {
 }
 
 
+def route_model_defaults(route: str) -> dict[str, str]:
+    """Return the default ``{fast, quality}`` model ids for a built-in route.
+
+    Lets the setup wizard pre-fill the model prompts for Route A/B so a user can
+    accept sensible defaults with Enter or type a different model id.
+    """
+    try:
+        return dict(_ROUTE_MODELS_DEFAULTS[route])
+    except KeyError:
+        raise ValueError(f"no model defaults for route {route!r}") from None
+
+
 @dataclass(frozen=True)
 class _ProviderBlock:
     """Indices of a ``providers.<name>:`` block in the YAML line list."""
@@ -291,7 +303,8 @@ def _custom_block_lines(
 def set_custom_provider(
     models_path: Path,
     *,
-    model: str,
+    fast_model: str,
+    quality_model: str,
     base_url: str,
     kind: str = ROUTE_OPENAI,
     api_mode: str = "chat_completions",
@@ -301,13 +314,14 @@ def set_custom_provider(
 
     Edits only those two blocks in place (returns ``True`` if the file changed),
     leaving every other line — including the ``embedder`` provider and the how-to
-    comments — untouched. Both roles share the one endpoint/model (a BYO provider
-    usually exposes a single model). Raises ``ValueError`` for an unsupported
-    kind or a missing provider block.
+    comments — untouched. ``fast_model``/``quality_model`` may be the same id (a
+    BYO endpoint often exposes one model) or different tiers. Raises
+    ``ValueError`` for an unsupported kind or a missing provider block.
     """
     if kind not in (ROUTE_OPENAI, ROUTE_OLLAMA):
         raise ValueError(f"unsupported custom provider kind: {kind!r}")
 
+    models = {"fast": fast_model, "quality": quality_model}
     lines = models_path.read_text(encoding="utf-8").splitlines()
     blocks = []
     for name in ("fast", "quality"):
@@ -323,7 +337,7 @@ def set_custom_provider(
         replacement = _custom_block_lines(
             name,
             kind=kind,
-            model=model,
+            model=models[name],
             base_url=base_url,
             api_mode=api_mode,
             api_key_env=api_key_env,

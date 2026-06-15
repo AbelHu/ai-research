@@ -140,6 +140,50 @@ def test_complete_redacts_secret_in_messages(monkeypatch: pytest.MonkeyPatch) ->
     assert "[REDACTED]" in raw_body
 
 
+def test_complete_surfaces_provider_error_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A 400 from a provider names the bad field in the body; the raised error
+    # must carry that text (not a blind "HTTP 400") so the cause is actionable.
+    def _bad_request(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "Unsupported value: 'temperature' does not support 0.2",
+                    "param": "temperature",
+                }
+            },
+        )
+
+    _install_mock_transport(monkeypatch, _bad_request)
+    provider = _make_provider()
+
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        provider.complete(CompletionRequest(messages=[{"role": "user", "content": "hi"}]))
+
+    message = str(excinfo.value)
+    assert "400" in message
+    assert "temperature" in message  # the provider's reason is surfaced
+    assert excinfo.value.response.status_code == 400  # still a normal HTTPStatusError
+
+
+def test_complete_error_body_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # If a provider echoes a secret in its error body, surfacing it must not leak.
+    planted = "ghp_0123456789abcdefghijklmnopqrstuvwxyz12"
+
+    def _unauthorized(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text=f"invalid token {planted}")
+
+    _install_mock_transport(monkeypatch, _unauthorized)
+    provider = _make_provider()
+
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        provider.complete(CompletionRequest(messages=[{"role": "user", "content": "hi"}]))
+
+    message = str(excinfo.value)
+    assert planted not in message  # scrubbed before it reaches logs/messages
+    assert "[REDACTED]" in message
+
+
 def _embed_handler(request: httpx.Request) -> httpx.Response:
     return httpx.Response(
         200,

@@ -171,12 +171,18 @@ def run_live(models: ModelsConfig, getenv: Getenv) -> int:
         return 1
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
-        print(f"[fail] Completion request failed with HTTP {code}.")
+        # `exc` now carries the provider's (redacted) error body — print it.
+        print(f"[fail] {exc}")
         if code in (401, 403):
             print("       Token may be invalid or missing the 'models: read' permission,")
             print("       or GitHub Models is not enabled for your enterprise/org.")
         elif code == 429:
             print("       Rate limited. Wait and retry, or opt into paid usage / BYOK.")
+        elif code == 400:
+            print("       The model rejected a request field. Common causes:")
+            print("       - the model only allows the default temperature (e.g. reasoning models),")
+            print("       - it needs 'max_completion_tokens' rather than 'max_tokens', or")
+            print("       - it doesn't support response_format json_object.")
         return 1
     except httpx.HTTPError as exc:
         print(f"[fail] Network error during completion: {exc}")

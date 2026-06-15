@@ -20,7 +20,7 @@ from typing import Protocol
 
 import httpx
 
-from app.advisor.redaction import ensure_no_secrets, redact_messages
+from app.advisor.redaction import ensure_no_secrets, redact_messages, redact_text
 from app.security import Secret
 
 # GitHub Models endpoints (verified against the GitHub Models REST API).
@@ -40,6 +40,34 @@ def _as_secret(value: Secret | str | None) -> Secret | None:
     if value is None or isinstance(value, Secret):
         return value
     return Secret(value)
+
+
+# Cap on how much of a provider error body we surface (enough to name the bad
+# field, short enough to keep logs/messages readable).
+_ERROR_BODY_LIMIT = 600
+
+
+def _raise_for_status(resp: httpx.Response) -> None:
+    """Like ``resp.raise_for_status()`` but include the provider's error body.
+
+    OpenAI-compatible providers describe *why* a request was rejected in the
+    response body (e.g. "Unsupported value: 'temperature'…"). The stock
+    ``raise_for_status`` drops it, leaving a blind "HTTP 400"; surfacing it turns
+    the error actionable. The body is secret-scrubbed (O16/§12) and truncated
+    before it goes into the exception message (and therefore into any log).
+    """
+    if not resp.is_error:
+        return
+    body = redact_text((resp.text or "").strip())
+    if len(body) > _ERROR_BODY_LIMIT:
+        body = body[:_ERROR_BODY_LIMIT] + "…"
+    detail = f" — {body}" if body else ""
+    request = resp.request
+    raise httpx.HTTPStatusError(
+        f"{resp.status_code} {resp.reason_phrase} from {request.method} {request.url}{detail}",
+        request=request,
+        response=resp,
+    )
 
 
 @dataclass
@@ -127,7 +155,7 @@ class OpenAICompatibleProvider:
                 headers=self._headers(),
                 json=payload,
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             data = resp.json()
 
         text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -144,7 +172,7 @@ class OpenAICompatibleProvider:
                 headers=self._headers(),
                 json={"model": self.model, "input": req.texts},
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             data = resp.json()
 
         vectors = [item["embedding"] for item in data.get("data", [])]

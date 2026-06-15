@@ -66,7 +66,7 @@ safe and never clobber working settings):
 
 | Step | What it does |
 |------|--------------|
-| **AI provider** | Pick one: **A** GitHub Copilot (device-flow login), **B** GitHub Models (PAT), or **C** Other — **any OpenAI-compatible endpoint** (OpenAI, Azure, OpenRouter, Groq, Together, vLLM, …) or a local **Ollama** server. For **C** you enter a name, provider type (`openai-compatible`/`ollama`), base URL, model, **API mode** (`chat_completions`, the default), and (optionally) an API key — the key is saved to `.env`, and only its **name** is written to `config/models.yaml`. |
+| **AI provider** | Pick one: **A** GitHub Copilot (device-flow login), **B** GitHub Models (PAT), or **C** Other — **any OpenAI-compatible endpoint** (OpenAI, Azure, OpenRouter, Groq, Together, vLLM, …) or a local **Ollama** server. Every route then lets you **choose the model ids** for the two tiers — **fast** (quick/cheap: triage, extraction) and **quality** (planning, drafting) — pre-filled with sensible defaults (press Enter to keep them). For **C** you also enter a name, provider type (`openai-compatible`/`ollama`), base URL, **API mode** (`chat_completions`, the default), and (optionally) an API key — the key is saved to `.env`, and only its **name** is written to `config/models.yaml`. |
 | **Telegram** | Capture `TELEGRAM_BOT_TOKEN` into `.env` (optionally verified via `getMe`). Skip if you only use the CLI. |
 | **Pairing** | Informational only — chat pairing is **request-and-approve at runtime** (no GitHub, no login): once the bot runs, a user messages it, the bot replies a one-time code, and you run `pair --approve <code>` to admit them. See [usage.md](usage.md) §3. |
 

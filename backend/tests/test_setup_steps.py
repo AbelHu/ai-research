@@ -126,6 +126,39 @@ def test_provider_route_a_logs_in_and_sets_route(models_path) -> None:
     assert current_route(models_path) == ROUTE_COPILOT
 
 
+def test_provider_route_a_lets_user_pick_models(models_path) -> None:
+    # Enter non-default model ids for both tiers; they land in fast + quality.
+    prompter, _ = _prompter(answers=["A", "o4-mini", "o3"])
+    result = provider_step(
+        prompter,
+        EnvFile(""),
+        models_path,
+        auth=_FakeAuth(False),
+        login_fn=lambda auth, p: True,
+        getenv=lambda _k: None,
+    )
+    assert result.status == CONFIGURED
+    out = models_path.read_text(encoding="utf-8")
+    assert "model: o4-mini" in out  # fast tier
+    assert "model: o3\n" in out  # quality tier
+
+
+def test_provider_route_a_keeps_default_models_on_enter(models_path) -> None:
+    # Pressing Enter at both model prompts keeps the route defaults.
+    prompter, _ = _prompter(answers=["A", "", ""])
+    provider_step(
+        prompter,
+        EnvFile(""),
+        models_path,
+        auth=_FakeAuth(False),
+        login_fn=lambda auth, p: True,
+        getenv=lambda _k: None,
+    )
+    out = models_path.read_text(encoding="utf-8")
+    assert "model: gpt-4o-mini" in out  # default fast
+    assert "model: gpt-4o\n" in out  # default quality
+
+
 def test_provider_route_b_captures_pat_and_switches(models_path) -> None:
     prompter, _ = _prompter(answers=["B"], secrets=["ghp_pat"])
     env = EnvFile("")
@@ -135,6 +168,17 @@ def test_provider_route_b_captures_pat_and_switches(models_path) -> None:
     assert result.status == CONFIGURED
     assert env.get("GITHUB_MODELS_TOKEN") == "ghp_pat"
     assert current_route(models_path) == ROUTE_MODELS
+
+
+def test_provider_route_b_lets_user_pick_models(models_path) -> None:
+    prompter, _ = _prompter(answers=["B", "openai/o4-mini", "openai/o3"], secrets=["ghp_pat"])
+    result = provider_step(
+        prompter, EnvFile(""), models_path, auth=_FakeAuth(False), getenv=lambda _k: None
+    )
+    assert result.status == CONFIGURED
+    out = models_path.read_text(encoding="utf-8")
+    assert "model: openai/o4-mini" in out
+    assert "model: openai/o3\n" in out
 
 
 def test_provider_route_b_without_pat_is_missing(models_path) -> None:
@@ -160,9 +204,16 @@ def test_provider_reconfigure_forces_prompt_even_when_usable(models_path) -> Non
 
 
 def test_provider_route_c_custom_openai(models_path) -> None:
-    # Choose C, name it, openai-compatible mode, base URL, model, then the key.
+    # Choose C, name it, openai-compatible type, base URL, fast + quality model, key.
     prompter, _ = _prompter(
-        answers=["C", "openrouter", "openai-compatible", "https://openrouter.ai/api/v1", "gpt-4o"],
+        answers=[
+            "C",
+            "openrouter",
+            "openai-compatible",
+            "https://openrouter.ai/api/v1",
+            "gpt-4o",
+            "gpt-4o",
+        ],
         secrets=["sk-custom-key"],
     )
     env = EnvFile("")
@@ -180,10 +231,32 @@ def test_provider_route_c_custom_openai(models_path) -> None:
     assert "sk-custom-key" not in out
 
 
+def test_provider_route_c_distinct_tiers(models_path) -> None:
+    # A cheap fast model + a stronger quality model on the same custom endpoint.
+    prompter, _ = _prompter(
+        answers=["C", "local", "ollama", "http://localhost:11434/v1", "llama3.2:3b", "llama3.1:70b"]
+    )
+    result = provider_step(
+        prompter, EnvFile(""), models_path, auth=_FakeAuth(False), getenv=lambda _k: None
+    )
+    assert result.status == CONFIGURED
+    out = models_path.read_text(encoding="utf-8")
+    assert "model: llama3.2:3b" in out  # fast tier
+    assert "model: llama3.1:70b" in out  # quality tier
+
+
 def test_provider_route_c_explicit_api_mode(models_path) -> None:
     # The user pins api_mode explicitly; it's recorded + echoed in the detail.
     prompter, _ = _prompter(
-        answers=["C", "azure", "openai-compatible", "https://x/v1", "gpt-4o", "chat_completions"],
+        answers=[
+            "C",
+            "azure",
+            "openai-compatible",
+            "https://x/v1",
+            "gpt-4o",
+            "gpt-4o",
+            "chat_completions",
+        ],
         secrets=["sk-k"],
     )
     result = provider_step(
@@ -197,7 +270,7 @@ def test_provider_route_c_explicit_api_mode(models_path) -> None:
 def test_provider_route_c_unsupported_api_mode_falls_back(models_path) -> None:
     # An unsupported api_mode warns and falls back to the default (never blocks).
     prompter, out = _prompter(
-        answers=["C", "x", "openai-compatible", "https://x/v1", "gpt-4o", "responses"],
+        answers=["C", "x", "openai-compatible", "https://x/v1", "gpt-4o", "gpt-4o", "responses"],
         secrets=[""],
     )
     result = provider_step(
@@ -210,7 +283,7 @@ def test_provider_route_c_unsupported_api_mode_falls_back(models_path) -> None:
 
 def test_provider_route_c_ollama_needs_no_key(models_path) -> None:
     # Blank base URL falls back to the Ollama default; no secret is prompted.
-    prompter, _ = _prompter(answers=["C", "local", "ollama", "", "llama3.1:8b"])
+    prompter, _ = _prompter(answers=["C", "local", "ollama", "", "llama3.1:8b", ""])
     env = EnvFile("")
     result = provider_step(
         prompter, env, models_path, auth=_FakeAuth(False), getenv=lambda _k: None

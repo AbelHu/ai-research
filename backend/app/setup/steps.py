@@ -25,6 +25,7 @@ from app.setup.config_writer import (
     api_key_env_for,
     current_api_key_env,
     current_route,
+    route_model_defaults,
     set_custom_provider,
     set_provider_route,
 )
@@ -84,6 +85,31 @@ def _default_login(auth, prompter: Prompter) -> bool:
     return run_login(auth, open_browser=False) == 0
 
 
+def _choose_models(
+    prompter: Prompter,
+    *,
+    fast_default: str | None = None,
+    quality_default: str | None = None,
+) -> tuple[str, str] | None:
+    """Prompt for the **fast** + **quality** model ids (the app's two model tiers).
+
+    ``fast`` backs quick/cheap roles (triage, extraction); ``quality`` backs
+    planning + drafting. Enter keeps the shown default. For a custom endpoint no
+    default is offered, so the fast model is required (blank → ``None``) and the
+    quality model defaults to the fast one (single-model endpoints just Enter).
+    """
+    prompter.say("  Models (Enter keeps the default):")
+    fast = prompter.ask("    fast model (quick, cheap tasks)", default=fast_default).strip()
+    fast = fast or (fast_default or "")
+    if not fast:
+        return None
+    quality = prompter.ask(
+        "    quality model (planning, drafting)", default=quality_default or fast
+    ).strip()
+    quality = quality or quality_default or fast
+    return fast, quality
+
+
 def provider_step(
     prompter: Prompter,
     env: EnvFile,
@@ -119,8 +145,16 @@ def provider_step(
         if not token:
             return StepResult("AI provider", MISSING, "no PAT entered")
         env.set("GITHUB_MODELS_TOKEN", token)
-        set_provider_route(models_path, ROUTE_MODELS)
-        return StepResult("AI provider", CONFIGURED, "route=github_models")
+        defaults = route_model_defaults(ROUTE_MODELS)
+        chosen = _choose_models(
+            prompter, fast_default=defaults["fast"], quality_default=defaults["quality"]
+        )
+        assert chosen is not None  # defaults provided → never None
+        fast_model, quality_model = chosen
+        set_provider_route(
+            models_path, ROUTE_MODELS, fast_model=fast_model, quality_model=quality_model
+        )
+        return StepResult("AI provider", CONFIGURED, f"route=github_models ({quality_model})")
 
     if choice.startswith("C"):
         return _configure_custom_provider(prompter, env, models_path)
@@ -128,8 +162,16 @@ def provider_step(
     # Route A: device-flow login, then point fast/quality at github_copilot.
     if not login_fn(auth, prompter):
         return StepResult("AI provider", MISSING, "device-flow login did not complete")
-    set_provider_route(models_path, ROUTE_COPILOT)
-    return StepResult("AI provider", CONFIGURED, "route=github_copilot")
+    defaults = route_model_defaults(ROUTE_COPILOT)
+    chosen = _choose_models(
+        prompter, fast_default=defaults["fast"], quality_default=defaults["quality"]
+    )
+    assert chosen is not None  # defaults provided → never None
+    fast_model, quality_model = chosen
+    set_provider_route(
+        models_path, ROUTE_COPILOT, fast_model=fast_model, quality_model=quality_model
+    )
+    return StepResult("AI provider", CONFIGURED, f"route=github_copilot ({quality_model})")
 
 
 def _configure_custom_provider(prompter: Prompter, env: EnvFile, models_path: Path) -> StepResult:
@@ -153,9 +195,10 @@ def _configure_custom_provider(prompter: Prompter, env: EnvFile, models_path: Pa
     base_url = prompter.ask("Base URL", default=default_base).strip()
     if not base_url:
         return StepResult("AI provider", MISSING, "no base URL entered")
-    model = prompter.ask("Model id").strip()
-    if not model:
+    chosen = _choose_models(prompter)  # no defaults: fast required, quality → fast
+    if chosen is None:
         return StepResult("AI provider", MISSING, "no model entered")
+    fast_model, quality_model = chosen
 
     # api_mode = chat request protocol. chat_completions is the default + the
     # only one wired today; an unsupported value warns and falls back (never
@@ -184,7 +227,8 @@ def _configure_custom_provider(prompter: Prompter, env: EnvFile, models_path: Pa
     set_custom_provider(
         models_path,
         kind=kind,
-        model=model,
+        fast_model=fast_model,
+        quality_model=quality_model,
         base_url=base_url,
         api_mode=api_mode,
         api_key_env=api_key_env,

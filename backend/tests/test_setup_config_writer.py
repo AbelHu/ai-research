@@ -148,7 +148,8 @@ def test_set_custom_provider_points_fast_and_quality(tmp_path) -> None:
 
     changed = set_custom_provider(
         path,
-        model="gpt-4o",
+        fast_model="gpt-4o-mini",
+        quality_model="gpt-4o",
         base_url="https://openrouter.ai/api/v1",
         api_key_env="OPENROUTER_API_KEY",
     )
@@ -158,6 +159,8 @@ def test_set_custom_provider_points_fast_and_quality(tmp_path) -> None:
 
     out = path.read_text(encoding="utf-8")
     assert out.count("kind: openai_compatible") == 2  # fast + quality
+    assert "model: gpt-4o-mini" in out  # fast tier
+    assert "model: gpt-4o" in out  # quality tier
     assert out.count("base_url: https://openrouter.ai/api/v1") == 2
     assert out.count("api_mode: chat_completions") == 2  # default mode written explicitly
     assert out.count("api_key_env: OPENROUTER_API_KEY") == 2
@@ -172,7 +175,11 @@ def test_set_custom_provider_ollama_omits_key(tmp_path) -> None:
     path.write_text(SHIPPED_MODELS, encoding="utf-8")
 
     set_custom_provider(
-        path, kind=ROUTE_OLLAMA, model="llama3.1:8b", base_url="http://localhost:11434/v1"
+        path,
+        kind=ROUTE_OLLAMA,
+        fast_model="llama3.1:8b",
+        quality_model="llama3.1:8b",
+        base_url="http://localhost:11434/v1",
     )
     assert current_route(path) == ROUTE_OLLAMA
     assert current_api_key_env(path) is None  # no key on the fast/quality blocks
@@ -182,8 +189,12 @@ def test_set_custom_provider_ollama_omits_key(tmp_path) -> None:
 def test_set_custom_provider_is_idempotent(tmp_path) -> None:
     path = tmp_path / "models.yaml"
     path.write_text(SHIPPED_MODELS, encoding="utf-8")
-    first = set_custom_provider(path, model="m", base_url="https://x/v1", api_key_env="K_API_KEY")
-    again = set_custom_provider(path, model="m", base_url="https://x/v1", api_key_env="K_API_KEY")
+    first = set_custom_provider(
+        path, fast_model="m", quality_model="m", base_url="https://x/v1", api_key_env="K_API_KEY"
+    )
+    again = set_custom_provider(
+        path, fast_model="m", quality_model="m", base_url="https://x/v1", api_key_env="K_API_KEY"
+    )
     assert first is True
     assert again is False  # second apply → no change
 
@@ -192,7 +203,9 @@ def test_set_custom_provider_rejects_unknown_kind(tmp_path) -> None:
     path = tmp_path / "models.yaml"
     path.write_text(SHIPPED_MODELS, encoding="utf-8")
     with pytest.raises(ValueError):
-        set_custom_provider(path, kind=ROUTE_COPILOT, model="m", base_url="https://x/v1")
+        set_custom_provider(
+            path, kind=ROUTE_COPILOT, fast_model="m", quality_model="m", base_url="https://x/v1"
+        )
 
 
 def test_api_key_env_for_derivation() -> None:
@@ -201,6 +214,22 @@ def test_api_key_env_for_derivation() -> None:
     assert api_key_env_for("my-llm.v2") == "MY_LLM_V2_API_KEY"
     assert api_key_env_for("") == "CUSTOM_API_KEY"
     assert api_key_env_for("***") == "CUSTOM_API_KEY"
+
+
+def test_set_custom_provider_distinct_tiers(tmp_path) -> None:
+    # fast + quality may differ (a cheap model for triage, a strong one to draft).
+    path = tmp_path / "models.yaml"
+    path.write_text(SHIPPED_MODELS, encoding="utf-8")
+    set_custom_provider(
+        path,
+        fast_model="gpt-4o-mini",
+        quality_model="gpt-4o",
+        base_url="https://x/v1",
+        api_key_env="X_API_KEY",
+    )
+    out = path.read_text(encoding="utf-8")
+    assert "model: gpt-4o-mini" in out
+    assert "model: gpt-4o\n" in out  # the quality tier id (exact line)
 
 
 def test_switch_back_to_copilot_drops_api_key_env(tmp_path) -> None:
