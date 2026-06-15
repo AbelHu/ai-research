@@ -16,6 +16,7 @@ from app.gateway.ingress import IngressResult, handle_inbound, parse_pair_comman
 from app.gateway.pairing import (
     PairResult,
     bind_verified_owner,
+    establish_owner,
     pair_with_host_code,
     run_device_flow_challenge,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "RefusalRateLimiter",
     "bind_verified_owner",
     "check_inbound",
+    "establish_owner",
     "handle_inbound",
     "pair_with_host_code",
     "parse_pair_command",

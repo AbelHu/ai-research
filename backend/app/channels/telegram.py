@@ -98,6 +98,15 @@ class TelegramAdapter:
             payload["reply_to_message_id"] = msg.reply_to_message_id
         self._call("sendMessage", payload)
 
+    def get_me(self) -> dict:
+        """Return the bot's own account via ``getMe`` (token check during setup).
+
+        Raises `TelegramError` if the token is rejected, so the setup wizard can
+        confirm a freshly-entered ``TELEGRAM_BOT_TOKEN`` actually works.
+        """
+        result = self._call("getMe", {})
+        return result if isinstance(result, dict) else {}
+
     # --- long-poll ----------------------------------------------------------
 
     def get_updates(self, *, offset: int | None = None) -> list[dict]:
