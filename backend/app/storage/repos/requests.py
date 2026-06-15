@@ -183,3 +183,46 @@ def get_job_for_request(conn: sqlite3.Connection, request_id: int) -> Job | None
         "SELECT * FROM jobs WHERE request_id = ? ORDER BY id LIMIT 1", (request_id,)
     ).fetchone()
     return Job.from_row(row) if row else None
+
+
+def add_request_detail(
+    conn: sqlite3.Connection,
+    *,
+    request_id: int,
+    content: str,
+    source: str = "user",
+    routed_by: str = "pm",
+    confidence: float | None = None,
+    reroute_count: int = 0,
+) -> int:
+    """Append a detail to a request (the §6C "append"). Returns the new row id.
+
+    A detail's lifecycle (active/rejected/reassigned) is tracked here, not on
+    `requests` — so an Analyzer reject mutates *this* row, never a request flag.
+    """
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO request_details "
+            "(request_id, content, source, routed_by, confidence, reroute_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (request_id, content, source, routed_by, confidence, reroute_count),
+        )
+    return int(cur.lastrowid)
+
+
+def list_request_details(
+    conn: sqlite3.Connection,
+    request_id: int,
+    *,
+    state: str | None = None,
+) -> list[sqlite3.Row]:
+    """Return a request's details in creation order, optionally filtered by state."""
+    if state is None:
+        return conn.execute(
+            "SELECT * FROM request_details WHERE request_id = ? ORDER BY id",
+            (request_id,),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM request_details WHERE request_id = ? AND state = ? ORDER BY id",
+        (request_id, state),
+    ).fetchall()

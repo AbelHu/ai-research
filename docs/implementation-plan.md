@@ -180,19 +180,19 @@ Each phase ends with a **✅ review checkpoint**. Phases are mostly sequential; 
 
 > Goal: answer a **simple ask** end-to-end through PM → Boss → Analyzer/Junior Worker, all via typed envelopes, driven from a CLI (no Telegram yet). Single hardcoded owner user.
 
-- [ ] **T4.1 — `RoleMessage` envelope + `Action` enum.** `app/roles/envelope.py` (pydantic) + persistence via the P1 `role_messages` repo.
+- [x] **T4.1 — `RoleMessage` envelope + `Action` enum.** `app/roles/envelope.py` (pydantic) + persistence via the P1 `role_messages` repo.
   - *Validate:* `tests/test_envelope.py` round-trips an envelope; `action` is constrained.
-- [ ] **T4.2 — Boss router skeleton.** `app/roles/boss.py` — maps an inbound `*_done`/`route_request` to the next verb (deterministic table). No real work yet.
+- [x] **T4.2 — Boss router skeleton.** `app/roles/boss.py` — maps an inbound `*_done`/`route_request` to the next verb (deterministic table). No real work yet.
   - *Validate:* test: given `analysis_done{plan_ready}` → schedules `review_plan`.
-- [ ] **T4.3 — PM first-pass routing.** `app/roles/pm.py` — wrap inbound into a `RequestCard`, auto-assign `/req` id, empty-queue=new, else best-guess (§6C). Emits `route_request`.
+- [x] **T4.3 — PM first-pass routing.** `app/roles/pm.py` — wrap inbound into a `RequestCard`, auto-assign `/req` id, empty-queue=new, else best-guess (§6C). Emits `route_request`.
   - *Validate:* `tests/test_pm_routing.py` — empty queue mints new; explicit `/req <id>` appends.
-- [ ] **T4.4 — Analyzer validation + triage.** `app/roles/analyzer.py` — confirm append vs reject (≤`max_append_reroutes`), classify kind (uses `Advisor.analyze`, T3.7). For an **ask**, route to Junior Worker.
+- [x] **T4.4 — Analyzer validation + triage.** `app/roles/analyzer.py` — confirm append vs reject (≤`max_append_reroutes`), classify kind (uses `Advisor.analyze`, T3.7). For an **ask**, route to Junior Worker.
   - *Validate:* test: wrong append rejected once → reroute; clear ask → `answer_ask`.
-- [ ] **T4.5 — Junior Worker (ask path).** `app/roles/junior.py` — run `memory.search` (+ stub web later) → draft validated answer with citations (uses `Advisor.answer`, T3.8) → `ask_done`.
+- [x] **T4.5 — Junior Worker (ask path).** `app/roles/junior.py` — run `memory.search` (+ stub web later) → draft validated answer with citations (uses `Advisor.answer`, T3.8) → `ask_done`.
   - *Validate:* test: ask → validated `AnswerDraft`.
-- [ ] **T4.6 — Control loop + `ask` CLI.** `app/cli/ask.py` drives one request through the company roles synchronously and prints the answer.
+- [x] **T4.6 — Control loop + `ask` CLI.** `app/cli/ask.py` drives one request through the company roles synchronously and prints the answer.
   - *Validate:* `python -m app.cli.ask "hello"` returns a validated answer; `tests/test_ask_e2e.py` with fake provider.
-- [ ] **T4.7 — Persist the full trace.** Ensure the run writes `requests`/`jobs`/`steps`/`role_messages`/`ai_calls` rows; add a recovery test (rebuild state from DB).
+- [x] **T4.7 — Persist the full trace.** Ensure the run writes `requests`/`jobs`/`steps`/`role_messages`/`ai_calls` rows; add a recovery test (rebuild state from DB).
   - *Validate:* test asserts the expected rows + a restart re-reads them.
 - ✅ **Checkpoint P4** — **simple ask works end-to-end, fully audited & recoverable.**
 
