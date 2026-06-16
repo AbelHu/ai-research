@@ -171,7 +171,9 @@ queue and exits).
 > quoting your original message so it's clear which request it answers.
 
 Open `http://127.0.0.1:8000` in a local browser for the HTML view, or use the
-JSON API directly (handy for scripting/testing):
+JSON API directly (handy for scripting/testing). The HTML dashboard
+**auto-refreshes every 10 seconds** so the data stays live without reloading by
+hand:
 
 | Route | Returns |
 |-------|---------|

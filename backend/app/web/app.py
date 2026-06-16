@@ -91,6 +91,9 @@ _ROUTES: list[_Route] = [
 
 # --- minimal HTML dashboard (browser view) ----------------------------------
 
+# How often the browser dashboard reloads itself to show fresh data (seconds).
+_DASHBOARD_REFRESH_SECONDS = 10
+
 
 def _escape(text: object) -> str:
     return (
@@ -102,7 +105,12 @@ def _escape(text: object) -> str:
 
 
 def _render_index(conn: sqlite3.Connection) -> str:
-    """A tiny server-rendered dashboard: system snapshot + the request list."""
+    """A tiny server-rendered dashboard: system snapshot + the request list.
+
+    The page **auto-refreshes** every ``_DASHBOARD_REFRESH_SECONDS`` via a
+    ``<meta http-equiv="refresh">`` tag, so the data stays live without any
+    client-side JavaScript (keeping the dashboard dependency-free).
+    """
     usage = services.model_usage(conn)
     metrics = services.system_metrics()
     requests = services.request_overview(conn, limit=50)
@@ -119,13 +127,16 @@ def _render_index(conn: sqlite3.Connection) -> str:
         f"<li>CPU load (1m): {_escape(cpu['load_1m'])} · cores: {_escape(cpu['cpu_count'])}</li>"
     )
     return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Assistant dashboard</title>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="{_DASHBOARD_REFRESH_SECONDS}">
+<title>Assistant dashboard</title>
 <style>body{{font-family:system-ui,sans-serif;margin:2rem;max-width:60rem}}
 table{{border-collapse:collapse;width:100%}}
 td,th{{border:1px solid #ccc;padding:.3rem .5rem;text-align:left}}
 .muted{{color:#666}}</style></head><body>
 <h1>Assistant dashboard</h1>
-<p class="muted">Local, read-only. JSON API under <code>/api/</code>;
+<p class="muted">Local, read-only. Auto-refreshes every
+{_DASHBOARD_REFRESH_SECONDS}s. JSON API under <code>/api/</code>;
 health at <code>/healthz</code>.</p>
 <h2>System</h2>
 <ul>

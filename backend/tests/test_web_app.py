@@ -84,6 +84,15 @@ def test_index_is_html(conn) -> None:
     assert "hello world" in text  # the request shows in the table
 
 
+def test_index_auto_refreshes(conn) -> None:
+    app = create_app(conn)
+    _, _, body = _call(app, "GET", "/")
+    text = body.decode("utf-8")
+    # A dependency-free meta refresh keeps the dashboard data live.
+    assert '<meta http-equiv="refresh"' in text
+    assert "Auto-refreshes" in text
+
+
 def test_index_escapes_html(conn) -> None:
     requests_repo.create_request(conn, title="<script>alert(1)</script>")
     app = create_app(conn)
