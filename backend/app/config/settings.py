@@ -26,7 +26,9 @@ class Settings(BaseSettings):
 
     github_models_token: Secret | None = None
     github_org: str | None = None
-    bing_search_key: Secret | None = None
+    # Tavily managed web search (free 1,000/mo, no credit card). The `web.search`
+    # skill is inert until this is set — env-gated like the AI providers (§12).
+    tavily_api_key: Secret | None = None
     openai_api_key: Secret | None = None
 
     # Telegram bot (channel adapter, §10). The bot token authenticates Bot API

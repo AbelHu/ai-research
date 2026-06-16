@@ -93,6 +93,20 @@ def http_url_exists(url: str, *, timeout: float = 10.0) -> bool:
         return False
 
 
+def is_public_fetch_url(url: str) -> bool:
+    """Whether ``url`` is a public http(s) URL that is safe to fetch.
+
+    Combines the static SSRF pre-check (:func:`is_safe_fetch_target`) with a DNS
+    resolution check, so a hostname that resolves to a private/loopback/reserved
+    address is refused **before** any connection is made. Used by the
+    ``web.fetch`` skill to guard model-/web-supplied URLs.
+    """
+    if not is_safe_fetch_target(url):
+        return False
+    host = urlparse(url).hostname
+    return bool(host and _resolves_to_public_only(host))
+
+
 def unresolved_citation_urls(citations: Iterable[Source], verify: UrlVerifier) -> list[str]:
     """Return the provided citation URLs that ``verify`` reports as non-existent.
 

@@ -26,6 +26,13 @@ junior_session_idle_minutes: 15
 # How often progress is surfaced to the user: "none" | "phase" | "task".
 progress_updates: phase
 
+# Web search (Tavily) is metered and its free credits are limited. Conserve them:
+# cap real (non-cached) searches per UTC day, and cache identical queries for a
+# window so repeats cost nothing. Set either to 0 to disable. Free tier is
+# ~1,000/month (about 33/day), so 50/day is generous but bounded.
+web_search_daily_max: 50
+web_search_cache_ttl_minutes: 15
+
 # Verify that any URL cited in an answer actually exists before the answer is
 # accepted (anti-hallucination, §7.1). Default on. Disable only if our
 # deterministic existence check is blocked by anti-crawler defenses (CAPTCHA,

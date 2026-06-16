@@ -13,17 +13,27 @@ forms the envelope (AI stays out of the control path).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
-import app.skills  # noqa: F401  -- ensure @skill registration (memory.search)
+import app.skills  # noqa: F401  -- ensure @skill registration (memory/web/data)
 from app.advisor.schemas import AnswerDraft
 from app.advisor.wrapper import Advisor, AdvisorValidationError
 from app.roles.envelope import Action, Role, RoleMessage
 from app.skills import runtime
 from app.skills.context import SkillContext
+from app.skills.policy import PermissionDenied
+from app.skills.registry import catalog
+from app.skills.runtime import InvalidParams, UnknownSkill
 
-# The Junior reads memory; it never writes (local_write/external need a gate).
-_JUNIOR_PERMISSIONS = frozenset({"memory.read"})
+# The Junior reads memory + read-only web/data tools; it never writes.
+_JUNIOR_PERMISSIONS = frozenset({"memory.read", "web.read", "data.read"})
+
+# Read-only tools the Junior may call to gather live/web context when local
+# memory has nothing. `web.search` is offered only when configured (a Tavily
+# key), so a key-free machine still gets `data.weather` + `web.fetch`.
+_RESEARCH_TOOLS_BASE = ("data.weather", "web.fetch")
+_MAX_RESEARCH_STEPS = 2
 
 # Fields of a memory hit safe to show the model. Internal identifiers (the DB
 # `id`) and lifecycle bookkeeping (`state`, `use_count`, TTL fields) are kept out
@@ -54,6 +64,102 @@ class JuniorResult:
     envelope: RoleMessage  # the `ask_done` hand-off to the Boss
 
 
+def _research_tool_names() -> set[str]:
+    """Read tools the Junior may use now (adds `web.search` only when configured)."""
+    from app.config.settings import get_settings
+
+    names = set(_RESEARCH_TOOLS_BASE)
+    try:
+        if get_settings().tavily_api_key is not None:
+            names.add("web.search")
+    except Exception:  # noqa: BLE001 - config trouble must never block answering
+        pass
+    return names
+
+
+def _finding_from_result(skill_name: str, value) -> list[dict]:
+    """Render a read-tool result as answer 'hits' (``ref`` = url so the model cites it)."""
+    data = value.model_dump()
+    if not data.get("ok"):
+        return []
+    if skill_name == "data.weather":
+        loc = data.get("location") or "the location"
+        lines = [
+            f"{d['date']}: {d['summary']}, {d.get('temp_min_c')}–{d.get('temp_max_c')}°C, "
+            f"precip {d.get('precip_prob_pct')}%"
+            for d in data.get("days", [])
+        ]
+        body = f"Weather forecast for {loc}, {data.get('country')}:\n" + "\n".join(lines)
+        return [
+            {"ref": data.get("source_url"), "title": f"Weather forecast for {loc}", "content": body}
+        ]
+    if skill_name == "web.search":
+        findings: list[dict] = []
+        if data.get("answer"):
+            findings.append(
+                {"ref": "web:search", "title": "Web search summary", "content": data["answer"]}
+            )
+        for hit in data.get("results", []):
+            findings.append(
+                {"ref": hit.get("url"), "title": hit.get("title"), "content": hit.get("snippet")}
+            )
+        return findings
+    if skill_name == "web.fetch":
+        return [
+            {
+                "ref": data.get("url"),
+                "title": data.get("title"),
+                "content": (data.get("text") or "")[:2000],
+            }
+        ]
+    return []
+
+
+def _research(
+    conn, advisor: Advisor, text: str, ctx: SkillContext, *, request_id: int, job_id: int
+) -> list[dict]:
+    """Bounded read-tool loop: gather web/live context when memory had nothing (§6A).
+
+    The advisor proposes which read tool to call (reusing ``next_action`` over a
+    restricted catalog); deterministic code runs it and renders the result as
+    citeable findings. If the model can't propose a valid tool (or says it's
+    done), we fall through and let it answer from its own knowledge.
+    """
+    allowed = _research_tool_names()
+    if not allowed:
+        return []
+    findings: list[dict] = []
+    progress = ""
+    for _ in range(_MAX_RESEARCH_STEPS):
+        try:
+            action = advisor.next_action(
+                goal=text,
+                catalog=json.dumps(catalog(allowed), ensure_ascii=False),
+                progress=progress,
+                request_id=request_id,
+                job_id=job_id,
+            )
+        except AdvisorValidationError:
+            break
+        if action.done or action.skill not in allowed:
+            break
+        try:
+            result = runtime.execute(action.skill, action.params, ctx)
+        except (UnknownSkill, InvalidParams, PermissionDenied):
+            break
+        new = _finding_from_result(action.skill, result.value) if result.value else []
+        if new:
+            findings.extend(new)
+            # One good finding answers a simple ask — stop rather than spending
+            # another (possibly metered, e.g. web.search) call. Multi-source
+            # gathering is the planned-job path, not the fast simple-ask path.
+            break
+        # The tool returned nothing useful; note it so the model can try a
+        # different tool on the next (bounded) step instead of repeating it.
+        progress += f"Tried {action.skill}; no useful result. "
+    return findings
+
+
 def answer_ask(
     conn,
     advisor: Advisor,
@@ -72,6 +178,13 @@ def answer_ask(
     )
     search = runtime.execute("memory.search", {"query": card["text"], "limit": search_limit}, ctx)
     hits = _hits_for_model(search.value.hits)
+
+    # When local memory has nothing relevant, gather live/web context (§6A) so a
+    # question needing current data (weather, etc.) can still be answered + cited.
+    if not hits:
+        hits = _research(
+            conn, advisor, card["text"], ctx, request_id=card["request_id"], job_id=job_id
+        )
 
     try:
         draft: AnswerDraft | None = advisor.answer(

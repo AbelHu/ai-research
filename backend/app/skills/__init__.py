@@ -7,6 +7,6 @@ Importing this package triggers ``@skill`` registration for every skill module
 
 from __future__ import annotations
 
-from app.skills import library, memory  # noqa: F401  (imported for @skill side effects)
+from app.skills import data, library, memory, web  # noqa: F401  (imported for @skill side effects)
 
-__all__ = ["library", "memory"]
+__all__ = ["data", "library", "memory", "web"]

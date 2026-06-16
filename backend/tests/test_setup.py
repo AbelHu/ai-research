@@ -82,7 +82,7 @@ def models_path(tmp_path):
 def test_run_setup_pure_skip_asks_nothing(conn, tmp_path, models_path) -> None:
     # Everything already configured: copilot logged in, telegram token, an account paired.
     env_path = tmp_path / ".env"
-    env = EnvFile("TELEGRAM_BOT_TOKEN=existing\n")
+    env = EnvFile("TELEGRAM_BOT_TOKEN=existing\nTAVILY_API_KEY=tvly-existing\n")
     owner_id = identities_repo.ensure_owner(conn)
     identities_repo.bind_identity(
         conn, user_id=owner_id, channel="telegram", channel_user_id="42", paired_via="host_code"
@@ -104,19 +104,20 @@ def test_run_setup_pure_skip_asks_nothing(conn, tmp_path, models_path) -> None:
 
     assert rc == 0
     assert dry_run_calls == ["x"]  # verify still runs
-    # All three steps were kept (the summary says so), and nothing was asked.
+    # All four steps were kept (the summary says so), and nothing was asked.
     summary = "\n".join(out)
-    assert summary.count("configured (kept)") == 3
+    assert summary.count("configured (kept)") == 4
 
 
 def test_run_setup_configures_everything(conn, tmp_path, models_path) -> None:
     env_path = tmp_path / ".env"
     env = EnvFile("")
 
-    # provider: choose B + PAT; telegram: token. Pairing is informational (no prompt).
+    # provider: choose B + PAT; telegram: token; web search: Tavily key. Pairing
+    # is informational (no prompt).
     prompter = Prompter(
         reader=_Script(["B"]),
-        secret_reader=_Script(["ghp_pat", "123:tok"]),
+        secret_reader=_Script(["ghp_pat", "123:tok", "tvly-key"]),
         writer=lambda _m: None,
     )
 
@@ -132,17 +133,18 @@ def test_run_setup_configures_everything(conn, tmp_path, models_path) -> None:
     )
 
     assert rc == 0
-    # .env persisted with both captured secrets.
+    # .env persisted with all captured secrets.
     saved = EnvFile.load(env_path)
     assert saved.get("GITHUB_MODELS_TOKEN") == "ghp_pat"
     assert saved.get("TELEGRAM_BOT_TOKEN") == "123:tok"
+    assert saved.get("TAVILY_API_KEY") == "tvly-key"
     # models.yaml switched to the PAT route; the owner record exists (no GitHub login).
     assert current_route(models_path) == ROUTE_MODELS
     assert identities_repo.get_owner(conn) is not None
 
 
 def test_run_setup_returns_verify_exit_code(conn, tmp_path, models_path) -> None:
-    env = EnvFile("TELEGRAM_BOT_TOKEN=x\n")
+    env = EnvFile("TELEGRAM_BOT_TOKEN=x\nTAVILY_API_KEY=tvly-x\n")
     identities_repo.set_owner_github_login(conn, "octocat")
     prompter = Prompter(reader=_Raises(), secret_reader=_Raises(), writer=lambda _m: None)
     rc = run_setup(
@@ -167,6 +169,17 @@ def test_check_all_missing(conn, models_path) -> None:
     assert by_name["Telegram"].status == MISSING
     # Pairing is request-and-approve at runtime — informational, never a blocker.
     assert by_name["Pairing"].status == KEPT
+    # Web search is optional — KEPT (off) without a key, never a blocker.
+    assert by_name["Web search"].status == KEPT
+    assert "off" in by_name["Web search"].detail
+
+
+def test_check_web_search_present_with_key(conn, models_path) -> None:
+    env = EnvFile("TAVILY_API_KEY=tvly-x\n")
+    results = check(conn, env, models_path, auth=_FakeAuth(False), getenv=lambda _k: None)
+    by_name = {r.name: r for r in results}
+    assert by_name["Web search"].status == KEPT
+    assert "present" in by_name["Web search"].detail
 
 
 def test_check_all_configured(conn, models_path) -> None:

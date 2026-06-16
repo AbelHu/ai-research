@@ -9,10 +9,11 @@ git operations):
     python -m app.cli.setup --reconfigure provider   # re-ask one step
 
 Takes an already-checked-out repo to a configured, verified, runnable app: pick
-+ authenticate the AI provider, set the Telegram bot token, and establish + pair
-the owner — **without hand-editing `.env` or `config/models.yaml`**. Each step
-**detects existing config and skips by default**, so re-runs are safe; only
-missing steps prompt. The wizard ends by running ``verify --dry-run``.
++ authenticate the AI provider, set the Telegram bot token, optionally enable web
+search (Tavily), and establish + pair the owner — **without hand-editing `.env`
+or `config/models.yaml`**. Each step **detects existing config and skips by
+default**, so re-runs are safe; only missing steps prompt. The wizard ends by
+running ``verify --dry-run``.
 
 The orchestration (`run_setup`/`check`) is unit-tested offline with injected I/O;
 ``main`` wires real stdin/stdout + the live seams.
@@ -40,6 +41,7 @@ from app.setup.steps import (
     pairing_step,
     provider_step,
     telegram_step,
+    web_search_step,
 )
 from app.storage.db import connect
 from app.storage.migrations import migrate
@@ -86,6 +88,8 @@ def check(
     # never a setup blocker; report how many accounts are currently paired.
     paired = identities_repo.list_identities(conn, state="paired")
     pairing_detail = f"{len(paired)} account(s) paired" if paired else "none yet (pair at runtime)"
+    # Web search is optional: a key enables it, no key just means it's off.
+    search_detail = "Tavily key present" if env.has_value("TAVILY_API_KEY") else "off (optional)"
     return [
         StepResult("AI provider", KEPT if provider_ok else MISSING, f"route={route}"),
         StepResult(
@@ -94,6 +98,7 @@ def check(
             "bot token",
         ),
         StepResult("Pairing", KEPT, pairing_detail),
+        StepResult("Web search", KEPT, search_detail),
     ]
 
 
@@ -110,6 +115,7 @@ def run_setup(
     provider_kwargs: dict | None = None,
     telegram_kwargs: dict | None = None,
     pairing_kwargs: dict | None = None,
+    web_search_kwargs: dict | None = None,
 ) -> int:
     """Run the steps in order, persist ``.env``, then verify. Returns an exit code.
 
@@ -134,6 +140,14 @@ def run_setup(
             skip_verify=skip_telegram_verify,
             reconfigure=_reconfigure("telegram", reconfigure),
             **(telegram_kwargs or {}),
+        )
+    )
+    results.append(
+        web_search_step(
+            prompter,
+            env,
+            reconfigure=_reconfigure("web-search", reconfigure),
+            **(web_search_kwargs or {}),
         )
     )
     results.append(
@@ -178,8 +192,8 @@ def main(argv: list[str] | None = None) -> int:
         nargs="?",
         const="all",
         default="none",
-        choices=["all", "provider", "telegram", "owner", "none"],
-        help="re-ask every step, or a single step (provider|telegram|owner)",
+        choices=["all", "provider", "telegram", "web-search", "owner", "none"],
+        help="re-ask every step, or a single step (provider|telegram|web-search|owner)",
     )
     parser.add_argument(
         "--skip-telegram-verify",

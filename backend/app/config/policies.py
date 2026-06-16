@@ -88,6 +88,12 @@ class Policies(BaseModel):
     unpaired_reply: UnpairedReply = "pair_hint"
     refusal_rate_limit_max: int = Field(default=3, ge=1)
     refusal_rate_limit_window_seconds: int = Field(default=60, ge=1)
+    # Web search (Tavily) is **metered** — credits are limited. Conserve them:
+    # cap real (non-cached) searches per UTC day, and cache identical queries so
+    # repeats cost nothing. 0 disables the cap / cache respectively. Free tier is
+    # ~1,000/mo (≈33/day), so 50/day is generous but bounded.
+    web_search_daily_max: int = Field(default=50, ge=0)
+    web_search_cache_ttl_minutes: int = Field(default=15, ge=0)
     # Deterministic memory weighting / TTL knobs (§9.1).
     memory: MemoryPolicy = Field(default_factory=MemoryPolicy)
 

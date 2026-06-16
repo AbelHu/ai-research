@@ -279,7 +279,34 @@ def telegram_step(
     return StepResult("Telegram", CONFIGURED, detail)
 
 
-# --- T9.5: owner pairing ----------------------------------------------------
+# --- web search (optional, Tavily) ------------------------------------------
+
+
+def web_search_step(
+    prompter: Prompter,
+    env: EnvFile,
+    *,
+    reconfigure: bool = False,
+) -> StepResult:
+    """Capture an optional Tavily API key for the ``web.search`` skill.
+
+    Web search is **optional**: weather and other special-data questions work
+    key-free, and general web search simply stays off until a key is set. So a
+    blank entry **skips** the step (never a `MISSING` that would block ``--check``).
+    """
+    current = env.get("TAVILY_API_KEY") or None
+    if not reconfigure and current:
+        return StepResult("Web search", KEPT, "Tavily key present")
+
+    prompter.say(
+        "Web search (optional): paste a Tavily API key to enable general web "
+        "search, or press Enter to skip (weather etc. still work without it)."
+    )
+    key = prompter.secret("Tavily API key", current=current)
+    if not key:
+        return StepResult("Web search", KEPT, "skipped (optional)")
+    env.set("TAVILY_API_KEY", key)
+    return StepResult("Web search", CONFIGURED, "Tavily key saved")
 
 
 # --- T9.5: chat pairing -----------------------------------------------------

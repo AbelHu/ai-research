@@ -28,6 +28,7 @@ from app.setup.steps import (
     pairing_step,
     provider_step,
     telegram_step,
+    web_search_step,
 )
 from app.storage.db import connect
 from app.storage.migrations import migrate
@@ -378,6 +379,43 @@ def test_telegram_no_token_is_missing() -> None:
     prompter, _ = _prompter(secrets=[""])
     result = telegram_step(prompter, EnvFile(""))
     assert result.status == MISSING
+
+
+# --- web search (optional Tavily key) ---------------------------------------
+
+
+def test_web_search_skipped_when_blank() -> None:
+    prompter, _ = _prompter(secrets=[""])  # press Enter to skip
+    env = EnvFile("")
+    result = web_search_step(prompter, env)
+    assert result.status == KEPT  # optional — never MISSING
+    assert "skipped" in result.detail
+    assert env.get("TAVILY_API_KEY") is None
+
+
+def test_web_search_captures_key() -> None:
+    prompter, _ = _prompter(secrets=["tvly-key"])
+    env = EnvFile("")
+    result = web_search_step(prompter, env)
+    assert result.status == CONFIGURED
+    assert env.get("TAVILY_API_KEY") == "tvly-key"
+
+
+def test_web_search_kept_when_key_present() -> None:
+    prompter, out = _prompter()  # KEPT path asks nothing
+    env = EnvFile("TAVILY_API_KEY=tvly-existing\n")
+    result = web_search_step(prompter, env)
+    assert result.status == KEPT
+    assert "present" in result.detail
+    assert out == []  # nothing prompted
+
+
+def test_web_search_reconfigure_reasks() -> None:
+    prompter, _ = _prompter(secrets=["tvly-new"])
+    env = EnvFile("TAVILY_API_KEY=tvly-old\n")
+    result = web_search_step(prompter, env, reconfigure=True)
+    assert result.status == CONFIGURED
+    assert env.get("TAVILY_API_KEY") == "tvly-new"
 
 
 # --- T9.5 chat pairing (informational, request-and-approve, no GitHub) -------
