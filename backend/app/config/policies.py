@@ -71,7 +71,7 @@ class Policies(BaseModel):
     # Retry attempts for transient background-job failures.
     max_job_retries: int = Field(default=1, ge=0)
     # Max skill proposals a task may execute before the Senior Worker stops.
-    max_task_steps: int = Field(default=1, ge=1)
+    max_task_steps: int = Field(default=3, ge=1)
     junior_session_idle_minutes: int = Field(default=15, ge=1)
     progress_updates: ProgressUpdates = "phase"
     # Verify that any URL cited in an answer actually exists before the answer

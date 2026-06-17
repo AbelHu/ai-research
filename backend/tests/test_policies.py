@@ -32,7 +32,7 @@ def test_defaults_match_spec() -> None:
     assert p.max_append_reroutes == 1
     assert p.max_concurrent_jobs == 3
     assert p.max_job_retries == 1
-    assert p.max_task_steps == 1
+    assert p.max_task_steps == 3
     assert p.junior_session_idle_minutes == 15
     assert p.progress_updates == "phase"
     assert p.verify_citation_urls is True  # cited-URL check ships ON (§7.1)

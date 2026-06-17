@@ -39,6 +39,8 @@ def _plan_json(*titles: str) -> str:
 
 APPROVE = json.dumps({"decision": "approve", "comments": []})
 SEARCH = json.dumps({"skill": "memory.search", "params": {"query": "x"}, "rationale": "r"})
+# Stops the bounded task loop after one executed action ([SEARCH, DONE] per task).
+DONE = json.dumps({"skill": "memory.search", "params": {}, "rationale": "done", "done": True})
 
 
 @pytest.fixture
@@ -128,7 +130,7 @@ def test_worker_runs_job_and_delivers_to_chat(conn) -> None:
     ensure_owner(conn)
     _req, job = _planned_job(conn)
     jq.enqueue(conn, job.id, channel="telegram", chat_id="4242", reply_to_message_id="7")
-    advisor = _advisor(conn, [_plan_json("Research"), APPROVE, SEARCH, APPROVE])
+    advisor = _advisor(conn, [_plan_json("Research"), APPROVE, SEARCH, DONE, APPROVE])
     sink = _Sink()
 
     rc = serve_jobs(conn, advisor, sink, once=True)
@@ -155,7 +157,7 @@ def test_worker_failure_marks_failed_and_keeps_going(conn) -> None:
 
     # First job's plan can't be drafted (unparseable) → fails; second succeeds.
     advisor = _advisor(
-        conn, ["(not valid json)", "(still bad)", _plan_json("P"), APPROVE, SEARCH, APPROVE]
+        conn, ["(not valid json)", "(still bad)", _plan_json("P"), APPROVE, SEARCH, DONE, APPROVE]
     )
     serve_jobs(conn, advisor, sink, once=True)
 

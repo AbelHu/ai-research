@@ -16,7 +16,9 @@ import sqlite3
 from dataclasses import dataclass
 
 # Lifecycle of a queued job. ``pending`` → ``running`` (claimed) → ``done`` |
-# ``failed``; a failed job stays for inspection (no auto-retry here).
+# ``failed``. Transient failures are requeued to ``pending`` by the worker
+# (bounded by ``max_job_retries``); a non-transient failure stays ``failed`` for
+# inspection.
 PENDING = "pending"
 RUNNING = "running"
 DONE = "done"

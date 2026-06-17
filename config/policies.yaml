@@ -23,8 +23,10 @@ max_concurrent_jobs: 3
 # Retry attempts for transient background-job failures.
 max_job_retries: 1
 
-# Max skill calls a single plan task may execute before the worker stops.
-max_task_steps: 1
+# Max skill calls a single plan task may execute before the worker stops. A
+# task loops propose -> execute until the worker signals done, repeats an
+# action, or hits this cap — so >1 enables real multi-step tasks.
+max_task_steps: 3
 
 # Idle minutes before a Junior Worker's warm ask session is retired (§6A).
 junior_session_idle_minutes: 15

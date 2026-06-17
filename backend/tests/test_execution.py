@@ -39,6 +39,9 @@ def _plan_json(*phase_titles: str) -> str:
 APPROVE = json.dumps({"decision": "approve", "comments": []})
 DECLINE = json.dumps({"decision": "decline", "comments": ["needs work"]})
 SEARCH = json.dumps({"skill": "memory.search", "params": {"query": "x"}, "rationale": "look it up"})
+# A task's "done" signal: the worker executes one action (SEARCH) then stops the
+# bounded loop on this, so each task consumes exactly [SEARCH, DONE].
+DONE = json.dumps({"skill": "memory.search", "params": {}, "rationale": "done", "done": True})
 
 
 @pytest.fixture
@@ -74,9 +77,10 @@ def _planned_job(conn, *, kind="task"):
 def test_executes_plan_end_to_end_and_delivers(conn) -> None:
     ensure_owner(conn)
     req, job, card = _planned_job(conn)
-    # make_plan(2 phases) → review_plan(approve) → [next_action, review_phase]×2.
+    # make_plan(2 phases) → review_plan(approve) → [next_action, done, review_phase]×2.
     advisor = _advisor(
-        conn, [_plan_json("Research", "Compare"), APPROVE, SEARCH, APPROVE, SEARCH, APPROVE]
+        conn,
+        [_plan_json("Research", "Compare"), APPROVE, SEARCH, DONE, APPROVE, SEARCH, DONE, APPROVE],
     )
 
     outcome = execute_planned_job(
@@ -121,12 +125,16 @@ def test_phase_decline_escalates(conn) -> None:
             _plan_json("Only"),
             APPROVE,
             SEARCH,
+            DONE,
             DECLINE,
             SEARCH,
+            DONE,
             DECLINE,
             SEARCH,
+            DONE,
             DECLINE,
             SEARCH,
+            DONE,
             DECLINE,
         ],
     )
@@ -142,7 +150,9 @@ def test_phase_decline_escalates(conn) -> None:
 def test_phase_decline_then_rework_can_complete(conn) -> None:
     req, job, card = _planned_job(conn)
     # First review declines (recoverable), second pass approves.
-    advisor = _advisor(conn, [_plan_json("Only"), APPROVE, SEARCH, DECLINE, SEARCH, APPROVE])
+    advisor = _advisor(
+        conn, [_plan_json("Only"), APPROVE, SEARCH, DONE, DECLINE, SEARCH, DONE, APPROVE]
+    )
 
     outcome = execute_planned_job(conn, advisor, job_id=job.id, card=card)
 
@@ -162,7 +172,7 @@ def test_card_for_job_reconstructs_from_db(conn) -> None:
 
 def test_execute_reconstructs_card_when_omitted(conn) -> None:
     req, job, _card = _planned_job(conn)
-    advisor = _advisor(conn, [_plan_json("Only"), APPROVE, SEARCH, APPROVE])
+    advisor = _advisor(conn, [_plan_json("Only"), APPROVE, SEARCH, DONE, APPROVE])
 
     # No card passed → execute rebuilds it from the job (background-runner path).
     outcome = execute_planned_job(conn, advisor, job_id=job.id)
@@ -187,7 +197,7 @@ def test_feature_job_generates_inert_skill(conn, tmp_path, monkeypatch) -> None:
         }
     )
     # plan → approve → task → approve(phase) → THEN coder.generate_skill.
-    advisor = _advisor(conn, [_plan_json("Build"), APPROVE, SEARCH, APPROVE, generated])
+    advisor = _advisor(conn, [_plan_json("Build"), APPROVE, SEARCH, DONE, APPROVE, generated])
 
     outcome = execute_planned_job(conn, advisor, job_id=job.id, card=card)
 
@@ -209,7 +219,8 @@ def test_feature_job_completes_even_if_codegen_fails(conn, tmp_path, monkeypatch
     ensure_owner(conn)
     req, job, card = _planned_job(conn, kind="feature")
     advisor = _advisor(
-        conn, [_plan_json("Build"), APPROVE, SEARCH, APPROVE, "(not valid json)", "(still bad)"]
+        conn,
+        [_plan_json("Build"), APPROVE, SEARCH, DONE, APPROVE, "(not valid json)", "(still bad)"],
     )
 
     outcome = execute_planned_job(conn, advisor, job_id=job.id, card=card)
