@@ -56,12 +56,15 @@ def all_phases_closed(conn, plan: Plan) -> bool:
     return bool(phases) and all(p.status == "Closed" for p in phases)
 
 
-def assemble_final_report(conn, plan: Plan, *, gain: Gain | None = None) -> FinalReport:
+def assemble_final_report(
+    conn, plan: Plan, *, gain: Gain | None = None, criteria_note: str | None = None
+) -> FinalReport:
     """Build the plan's §9.2 final report from its phases (Plan Expert, §6B).
 
     Deterministic assembly: the title/keywords come from the request + phases.
-    The Librarian commits it (T5.8); the Company Expert / PM handle sign-off and
-    user confirmation.
+    ``criteria_note`` (when the P3 success-criteria check ran) is appended to the
+    brief so completion is evidence-backed. The Librarian commits it (T5.8); the
+    Company Expert / PM handle sign-off and user confirmation.
     """
     job = requests_repo.get_job(conn, plan.job_id)
     if job is None:
@@ -73,6 +76,8 @@ def assemble_final_report(conn, plan: Plan, *, gain: Gain | None = None) -> Fina
     phases = plans_repo.list_phases(conn, plan.id)
     phase_titles = [p.title or f"phase {p.idx}" for p in phases]
     brief = "Completed phases: " + ", ".join(phase_titles) if phase_titles else "No phases."
+    if criteria_note:
+        brief += f" {criteria_note}"
 
     return FinalReport(
         request_id=request.id,

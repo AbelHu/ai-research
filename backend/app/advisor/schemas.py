@@ -81,6 +81,30 @@ class PlanSpec(_Strict):
     """
 
     phases: list[PhaseSpec] = Field(..., min_length=1)
+    # Explicit, checkable completion criteria for the goal (§6B; P3). Optional so
+    # older plan replies still validate; when present, the runner verifies them
+    # before reporting the job completed.
+    success_criteria: list[str] = Field(default_factory=list)
+
+
+class CriterionResult(_Strict):
+    """One success criterion's verification outcome (template ``expert.verify``)."""
+
+    criterion: str = Field(..., min_length=1)
+    met: bool
+    note: str = ""
+
+
+class CriteriaReport(_Strict):
+    """Goal-criteria verification verdict before a job is reported done (§6B; P3).
+
+    The Plan Expert advises whether each explicit success criterion is satisfied
+    by the work done; deterministic code decides whether to complete the job or
+    escalate/replan. ``all_met`` is the single gate code reads.
+    """
+
+    results: list[CriterionResult] = Field(default_factory=list)
+    all_met: bool
 
 
 class Analysis(_Strict):

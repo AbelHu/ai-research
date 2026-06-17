@@ -28,6 +28,17 @@ max_job_retries: 1
 # action, or hits this cap — so >1 enables real multi-step tasks.
 max_task_steps: 3
 
+# Verify the plan's explicit success criteria before reporting a job done
+# (§6B; P3). When a plan carries success_criteria, the runner checks them and
+# escalates instead of reporting a false completion. Set false for status-only
+# completion.
+verify_success_criteria: true
+
+# Bounded automatic replans when the Company Expert declines the drafted plan,
+# before escalating to the user (§6B; P2#4). The reviewer's feedback feeds the
+# redraft. 0 disables auto-replan.
+max_replan_attempts: 1
+
 # Idle minutes before a Junior Worker's warm ask session is retired (§6A).
 junior_session_idle_minutes: 15
 

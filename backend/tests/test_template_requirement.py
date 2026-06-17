@@ -20,6 +20,7 @@ CASES = [
     ("analyzer.analyze", schemas.Analysis),
     ("analyzer.plan", schemas.PlanSpec),
     ("expert.review", schemas.Verdict),
+    ("expert.verify", schemas.CriteriaReport),
     ("worker.next_action", schemas.ProposedAction),
     ("junior.answer", schemas.AnswerDraft),
     ("coder.generate", schemas.GeneratedSkill),

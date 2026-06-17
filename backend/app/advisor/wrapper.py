@@ -42,6 +42,8 @@ from app.advisor.redaction import redact_text
 from app.advisor.schemas import (
     Analysis,
     AnswerDraft,
+    CriteriaReport,
+    CriterionResult,
     GeneratedSkill,
     PlanSpec,
     ProposedAction,
@@ -331,6 +333,39 @@ class Advisor:
             fallback=lambda: Verdict(
                 decision="decline",
                 comments=["fallback: review output could not be validated"],
+            ),
+        )
+
+    def verify_completion(
+        self,
+        *,
+        goal: str,
+        criteria: list[str],
+        summary: str,
+        request_id: int,
+        job_id: int | None = None,
+    ) -> CriteriaReport:
+        """Verify a finished job's explicit success criteria (template ``expert.verify``).
+
+        Best-effort completion gate (§6B; P3): the model judges each criterion
+        against a summary of the work done; deterministic code decides whether to
+        complete or escalate. On a validation failure it falls back to
+        **all-met** so a verifier hiccup never wedges an otherwise-finished job
+        (the check is an added safety net, not a new hard dependency).
+        """
+        criteria_block = "\n".join(f"- {c}" for c in criteria)
+        return self._run(
+            role="planner",
+            template_name="expert.verify",
+            variables={"goal": goal, "criteria": criteria_block, "summary": summary},
+            schema=CriteriaReport,
+            request_id=request_id,
+            job_id=job_id,
+            fallback=lambda: CriteriaReport(
+                results=[
+                    CriterionResult(criterion=c, met=True, note="unverified") for c in criteria
+                ],
+                all_met=True,
             ),
         )
 

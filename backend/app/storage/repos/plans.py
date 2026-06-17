@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.advisor.schemas import PlanSpec
 
@@ -25,6 +25,7 @@ class Plan:
     resolved_by: str | None
     closed_by: str | None
     created_at: str
+    success_criteria: list[str] = field(default_factory=list)
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Plan:
@@ -36,6 +37,9 @@ class Plan:
             resolved_by=row["resolved_by"],
             closed_by=row["closed_by"],
             created_at=row["created_at"],
+            success_criteria=(
+                json.loads(row["success_criteria_json"]) if row["success_criteria_json"] else []
+            ),
         )
 
 
@@ -112,7 +116,10 @@ def create_plan_from_spec(conn: sqlite3.Connection, *, job_id: int, spec: PlanSp
     so the runner resolves dependencies without re-deriving indices.
     """
     with conn:
-        cur = conn.execute("INSERT INTO plans (job_id) VALUES (?)", (job_id,))
+        cur = conn.execute(
+            "INSERT INTO plans (job_id, success_criteria_json) VALUES (?, ?)",
+            (job_id, json.dumps(list(spec.success_criteria))),
+        )
         plan_id = int(cur.lastrowid)
         for p_idx, phase in enumerate(spec.phases):
             pcur = conn.execute(
@@ -147,8 +154,10 @@ def get_plan(conn: sqlite3.Connection, plan_id: int) -> Plan | None:
 
 
 def get_plan_for_job(conn: sqlite3.Connection, job_id: int) -> Plan | None:
+    # The latest plan is the active one: a declined draft may have been abandoned
+    # and redrafted by the bounded auto-replan loop (P2#4).
     row = conn.execute(
-        "SELECT * FROM plans WHERE job_id = ? ORDER BY id LIMIT 1", (job_id,)
+        "SELECT * FROM plans WHERE job_id = ? ORDER BY id DESC LIMIT 1", (job_id,)
     ).fetchone()
     return Plan.from_row(row) if row else None
 

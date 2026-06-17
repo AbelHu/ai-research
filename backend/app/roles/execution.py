@@ -24,6 +24,7 @@ import logging
 from dataclasses import dataclass
 
 from app.advisor.wrapper import Advisor
+from app.config.policies import get_policies
 from app.memory.reports import FinalReport
 from app.roles import analyzer, coder, company_expert, conversation, plan_expert, pm, senior
 from app.roles.envelope import Role
@@ -70,6 +71,21 @@ def card_for_job(conn, job_id: int) -> dict:
         "text": request.title or "",
         "append": False,
     }
+
+
+def _completion_summary(conn, plan) -> str:
+    """A short, id-free summary of what a plan accomplished (for the P3 check).
+
+    Built from the plan's phases + task titles so the verifier judges criteria
+    against the actual work breakdown, not internal ids.
+    """
+    lines: list[str] = []
+    for phase in plans_repo.list_phases(conn, plan.id):
+        tasks = plans_repo.list_tasks(conn, phase.id)
+        task_titles = ", ".join(t.title or "task" for t in tasks) or "—"
+        name = phase.title or f"phase {phase.idx}"
+        lines.append(f"Phase '{name}' ({phase.status}): {task_titles}")
+    return "\n".join(lines) if lines else "No phases were run."
 
 
 def _run_one_phase(
@@ -145,11 +161,26 @@ def execute_planned_job(
         )
         card = {**card, "context": conversation.render(conversation.build(conn, prior))}
 
-    # 1) Analyzer drafts + persists the plan (phases → tasks, all New).
+    # 1-2) Draft + review the plan, with bounded auto-replan on a decline (P2#4):
+    # the reviewer's comments feed the redraft so the next plan addresses them,
+    # before we escalate to the user. The declined draft is abandoned each round.
+    max_replans = get_policies().max_replan_attempts
     plan = analyzer.draft_plan(conn, advisor, card, job_id=job_id)
-
-    # 2) Company Expert reviews the plan; approval cascades New → Approved.
     review = company_expert.review_plan(conn, advisor, plan, request_id=request_id)
+    replans = 0
+    while not review.approved and replans < max_replans:
+        replans += 1
+        plans_repo.set_plan_status(conn, plan.id, "Abandoned", actor=Role.company_expert)
+        feedback = "; ".join(review.verdict.comments) or "it did not pass review"
+        replan_card = {
+            **card,
+            "context": (card.get("context") or "")
+            + f"\n\nA previous plan was declined ({feedback}). "
+            "Draft a revised plan that addresses that feedback.",
+        }
+        plan = analyzer.draft_plan(conn, advisor, replan_card, job_id=job_id)
+        review = company_expert.review_plan(conn, advisor, plan, request_id=request_id)
+
     if not review.approved:
         delivery = pm.format_delivery(
             request,
@@ -195,6 +226,40 @@ def execute_planned_job(
                     delivery=delivery,
                 )
 
+    # 4b) Verify the goal's explicit success criteria before reporting done (P3).
+    # Only gates when the plan carried criteria and the policy is on; an unmet
+    # check escalates honestly rather than reporting a false completion.
+    criteria_note: str | None = None
+    stored_plan = plans_repo.get_plan(conn, plan.id)
+    criteria = stored_plan.success_criteria if stored_plan else []
+    if criteria and get_policies().verify_success_criteria:
+        verdict = advisor.verify_completion(
+            goal=card["text"],
+            criteria=criteria,
+            summary=_completion_summary(conn, plan),
+            request_id=request_id,
+            job_id=job_id,
+        )
+        if not verdict.all_met:
+            unmet = [r.criterion for r in verdict.results if not r.met] or criteria
+            delivery = pm.format_delivery(
+                request,
+                "I worked through the plan but couldn't confirm it meets the goal "
+                "yet — these criteria aren't satisfied: " + "; ".join(unmet) + ". "
+                "I'll follow up rather than report it done.",
+            )
+            # Wait on the user: their next reply threads back here (§6C continuity).
+            requests_repo.set_request_status(conn, request_id, requests_repo.AWAITING_STATUS)
+            return JobOutcome(
+                status="criteria_unmet",
+                job_id=job_id,
+                request=request,
+                plan_id=plan.id,
+                delivery=delivery,
+            )
+        met_count = sum(1 for r in verdict.results if r.met) or len(criteria)
+        criteria_note = f"Verified {met_count}/{len(criteria)} success criteria met."
+
     # 5) Company Expert: plan InProgress → Resolved (all phases signed off).
     plans_repo.set_plan_status(conn, plan.id, "Resolved", actor=Role.company_expert)
 
@@ -207,7 +272,7 @@ def execute_planned_job(
         generated = _try_generate_skill(conn, advisor, job_id=job_id, goal=card["text"])
 
     # 7) Plan Expert assembles the §9.2 final report.
-    report = plan_expert.assemble_final_report(conn, plan)
+    report = plan_expert.assemble_final_report(conn, plan, criteria_note=criteria_note)
 
     # 8) PM delivers the result to the user (noting any code awaiting confirmation).
     message = report.brief_description

@@ -72,6 +72,13 @@ class Policies(BaseModel):
     max_job_retries: int = Field(default=1, ge=0)
     # Max skill proposals a task may execute before the Senior Worker stops.
     max_task_steps: int = Field(default=3, ge=1)
+    # Verify the plan's explicit success criteria before reporting a job done
+    # (§6B; P3). Default on: completion is gated on the criteria check when the
+    # plan carries criteria. Disabling reverts to status-only completion.
+    verify_success_criteria: bool = True
+    # Bounded automatic replans when the Company Expert declines the drafted plan,
+    # before escalating to the user (§6B; P2#4). 0 disables auto-replan.
+    max_replan_attempts: int = Field(default=1, ge=0)
     junior_session_idle_minutes: int = Field(default=15, ge=1)
     progress_updates: ProgressUpdates = "phase"
     # Verify that any URL cited in an answer actually exists before the answer

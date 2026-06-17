@@ -104,3 +104,28 @@ def test_all_phases_closed_false_when_open(db) -> None:
     spec = PlanSpec(phases=[PhaseSpec(title="P", tasks=[TaskSpec(title="a")])])
     req, job, plan = _plan(db, spec)
     assert all_phases_closed(db, plan) is False  # phases are Approved, not Closed
+
+
+def test_plan_persists_success_criteria(db) -> None:
+    # The Analyzer's success_criteria round-trip through the plans repo (P3).
+    spec = PlanSpec(
+        phases=[PhaseSpec(title="P", tasks=[TaskSpec(title="a")])],
+        success_criteria=["compares 3 vendors", "gives one recommendation"],
+    )
+    req, job, plan = _plan(db, spec)
+    stored = plans_repo.get_plan(db, plan.id)
+    assert stored.success_criteria == ["compares 3 vendors", "gives one recommendation"]
+
+
+def test_plan_without_criteria_defaults_empty(db) -> None:
+    spec = PlanSpec(phases=[PhaseSpec(title="P", tasks=[TaskSpec(title="a")])])
+    req, job, plan = _plan(db, spec)
+    assert plans_repo.get_plan(db, plan.id).success_criteria == []
+
+
+def test_final_report_appends_criteria_note(db) -> None:
+    spec = PlanSpec(phases=[PhaseSpec(title="P", tasks=[TaskSpec(title="a")])])
+    req, job, plan = _plan(db, spec)
+    report = assemble_final_report(db, plan, criteria_note="Verified 2/2 success criteria met.")
+    assert "Verified 2/2 success criteria met." in report.brief_description
+

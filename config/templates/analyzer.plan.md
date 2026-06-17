@@ -18,6 +18,10 @@ Respond with a **single JSON object** only:
     - `depends_on`: array of 0-based indices of **earlier tasks in the same
       phase** that must finish first (empty if none).
     - `run_mode`: `"serial"` or `"parallel"`.
+- `success_criteria`: an array of short, **checkable** statements that must all
+  be true for the goal to count as done (e.g. `["compares at least 3 vendors",
+  "gives one clear recommendation"]`). Keep them concrete and verifiable; the
+  system checks them before reporting the job complete.
 
 Keep it minimal and concrete — only the phases/tasks actually needed. Respond
 with JSON only — no prose, no code fences.

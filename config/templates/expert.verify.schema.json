@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "title": "CriteriaReport",
+  "properties": {
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "criterion": { "type": "string", "minLength": 1 },
+          "met": { "type": "boolean" },
+          "note": { "type": "string" }
+        },
+        "required": ["criterion", "met"],
+        "additionalProperties": false
+      }
+    },
+    "all_met": { "type": "boolean" }
+  },
+  "required": ["all_met"],
+  "additionalProperties": false
+}

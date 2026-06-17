@@ -22,18 +22,19 @@ from app.storage.repos import requests as requests_repo
 from tests.fakes import FakeProvider
 
 
-def _plan_json(*phase_titles: str) -> str:
-    return json.dumps(
-        {
-            "phases": [
-                {
-                    "title": t,
-                    "tasks": [{"title": f"do {t}", "depends_on": [], "run_mode": "serial"}],
-                }
-                for t in phase_titles
-            ]
-        }
-    )
+def _plan_json(*phase_titles: str, criteria: list[str] | None = None) -> str:
+    payload: dict = {
+        "phases": [
+            {
+                "title": t,
+                "tasks": [{"title": f"do {t}", "depends_on": [], "run_mode": "serial"}],
+            }
+            for t in phase_titles
+        ]
+    }
+    if criteria is not None:
+        payload["success_criteria"] = criteria
+    return json.dumps(payload)
 
 
 APPROVE = json.dumps({"decision": "approve", "comments": []})
@@ -103,17 +104,37 @@ def test_executes_plan_end_to_end_and_delivers(conn) -> None:
 
 def test_plan_declined_stops_and_reports(conn) -> None:
     req, job, card = _planned_job(conn)
-    advisor = _advisor(conn, [_plan_json("Only"), DECLINE])  # plan review declines
+    # Plan declined twice (initial + the one bounded replan) → escalate to user.
+    advisor = _advisor(conn, [_plan_json("Only"), DECLINE, _plan_json("Only"), DECLINE])
 
     outcome = execute_planned_job(conn, advisor, job_id=job.id, card=card)
 
     assert outcome.status == "plan_declined"
     assert outcome.delivery is not None and "didn't pass review" in outcome.delivery
-    # The plan stayed New (never approved); nothing executed.
+    # The latest plan stayed New (never approved); nothing executed.
     plan = plans_repo.get_plan_for_job(conn, job.id)
     assert plan.status == "New"
     # The request now awaits the user's reply so a follow-up threads back to it.
     assert requests_repo.get_request(conn, req.id).status == requests_repo.AWAITING_STATUS
+
+
+def test_plan_declined_then_replan_completes(conn) -> None:
+    ensure_owner(conn)
+    req, job, card = _planned_job(conn)
+    # First plan declined → bounded replan drafts a revised plan that is approved
+    # → the job completes end-to-end without bothering the user (P2#4).
+    advisor = _advisor(
+        conn,
+        [_plan_json("Only"), DECLINE, _plan_json("Only"), APPROVE, SEARCH, DONE, APPROVE],
+    )
+
+    outcome = execute_planned_job(
+        conn, advisor, job_id=job.id, card=card, user_id=ensure_owner(conn)
+    )
+
+    assert outcome.status == "completed"
+    # The active (latest) plan is the approved replan, and it resolved.
+    assert plans_repo.get_plan_for_job(conn, job.id).status == "Resolved"
 
 
 def test_phase_decline_escalates(conn) -> None:
@@ -158,6 +179,51 @@ def test_phase_decline_then_rework_can_complete(conn) -> None:
 
     assert outcome.status == "completed"
     assert outcome.delivery is not None and f"/req {req.code}" in outcome.delivery
+
+
+VERIFY_OK = json.dumps(
+    {"results": [{"criterion": "c1", "met": True, "note": "ok"}], "all_met": True}
+)
+VERIFY_FAIL = json.dumps(
+    {"results": [{"criterion": "c1", "met": False, "note": "missing"}], "all_met": False}
+)
+
+
+def test_completed_job_verifies_success_criteria(conn) -> None:
+    ensure_owner(conn)
+    req, job, card = _planned_job(conn)
+    # plan(+criteria) → approve → task[SEARCH,DONE] → approve(phase) → verify(all met).
+    advisor = _advisor(
+        conn,
+        [_plan_json("Research", criteria=["c1"]), APPROVE, SEARCH, DONE, APPROVE, VERIFY_OK],
+    )
+
+    outcome = execute_planned_job(
+        conn, advisor, job_id=job.id, card=card, user_id=ensure_owner(conn)
+    )
+
+    assert outcome.status == "completed"
+    assert outcome.report is not None
+    # The completion note is surfaced in the final report (evidence-backed).
+    assert "success criteria met" in outcome.report.brief_description
+    assert plans_repo.get_plan_for_job(conn, job.id).status == "Resolved"
+
+
+def test_criteria_unmet_escalates_without_completing(conn) -> None:
+    ensure_owner(conn)
+    req, job, card = _planned_job(conn)
+    advisor = _advisor(
+        conn,
+        [_plan_json("Research", criteria=["c1"]), APPROVE, SEARCH, DONE, APPROVE, VERIFY_FAIL],
+    )
+
+    outcome = execute_planned_job(conn, advisor, job_id=job.id, card=card)
+
+    assert outcome.status == "criteria_unmet"
+    assert outcome.delivery is not None and "aren't satisfied" in outcome.delivery
+    # The plan is NOT resolved and the request awaits the user (honest stop).
+    assert plans_repo.get_plan_for_job(conn, job.id).status == "InProgress"
+    assert requests_repo.get_request(conn, req.id).status == requests_repo.AWAITING_STATUS
 
 
 def test_card_for_job_reconstructs_from_db(conn) -> None:

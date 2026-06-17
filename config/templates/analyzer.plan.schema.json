@@ -26,6 +26,10 @@
         "required": ["title"],
         "additionalProperties": false
       }
+    },
+    "success_criteria": {
+      "type": "array",
+      "items": { "type": "string" }
     }
   },
   "required": ["phases"],
