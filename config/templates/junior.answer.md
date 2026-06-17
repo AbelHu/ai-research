@@ -7,6 +7,8 @@ answer and **back it with sources**. Do not invent facts or sources.
 Request:
 {{ text }}
 
+{{ context }}
+
 Context (search hits):
 {{ hits }}
 

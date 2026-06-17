@@ -28,6 +28,7 @@ from app.storage.repos import identities as identities_repo
 from app.storage.repos import job_queue as job_queue_repo
 from app.storage.repos import pairing_codes as pairing_codes_repo
 from app.storage.repos import pairing_requests as pairing_requests_repo
+from app.storage.repos import requests as requests_repo
 from tests.fakes import FakeProvider
 
 ANALYSIS_ASK = json.dumps(
@@ -230,6 +231,45 @@ def test_paired_sender_unanswerable_ask_is_escalated(conn) -> None:
     assert len(pending) == 1
     assert pending[0].chat_id == "4242"
     assert pending[0].reply_to_message_id == "7"  # quotes the user's message
+
+
+def test_clarification_followup_threads_to_same_request(conn) -> None:
+    # When the assistant asks for clarification, the sender's next (unprefixed)
+    # message must continue the SAME request, not start a brand-new one.
+    minted = pairing_codes_repo.mint_code(conn)
+    clarify = json.dumps(
+        {
+            "belongs": True,
+            "kind": "ask",
+            "clarity": "unclear",
+            "complexity": "simple",
+            "confidence": 0.4,
+            "rationale": "ambiguous — which currency?",
+            "clarify": ["Which currency do you want the gold price in?"],
+        }
+    )
+    # One shared advisor: planner replays clarify → (clear) ask across the two turns.
+    providers = {
+        "planner": FakeProvider([clarify, ANALYSIS_ASK]),
+        "drafter": FakeProvider(ANSWER),
+    }
+    advisor = Advisor(resolve_provider=lambda role: providers[role], conn=conn)
+    handle_inbound(conn, _inbound(f"/pair {minted.code}"), advisor=advisor)
+
+    # 1) First message → clarification asked; the request is marked awaiting.
+    first = handle_inbound(conn, _inbound("gold price"), advisor=advisor)
+    assert "needs clarification" in first.reply.text
+    requests = requests_repo.list_requests(conn)
+    assert len(requests) == 1
+    assert requests[0].status == requests_repo.AWAITING_STATUS
+
+    # 2) A plain follow-up (no /req marker) threads to the SAME request.
+    handle_inbound(conn, _inbound("in USD"), advisor=advisor)
+    assert len(requests_repo.list_requests(conn)) == 1  # no second request minted
+    details = requests_repo.list_request_details(conn, requests[0].id)
+    assert [d["content"] for d in details] == ["in USD"]
+    # The awaiting flag was cleared when the reply arrived.
+    assert requests_repo.get_request(conn, requests[0].id).status is None
 
 
 def test_paired_then_revoked_sender_is_refused(conn) -> None:

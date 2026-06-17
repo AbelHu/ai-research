@@ -18,7 +18,7 @@ from typing import Literal
 
 from app.advisor.schemas import AnswerDraft
 from app.advisor.wrapper import Advisor
-from app.roles import analyzer, boss, junior, pm
+from app.roles import analyzer, boss, conversation, junior, pm
 from app.roles.envelope import Action, Role, RoleMessage
 from app.storage.repos import requests as requests_repo
 from app.storage.repos import role_messages as role_messages_repo
@@ -68,27 +68,63 @@ def _emit_boss(
     )
 
 
-def run_ask(conn, advisor: Advisor, text: str, *, user_id: int | None = None) -> AskOutcome:
-    """Drive one inbound message end-to-end, returning the terminal outcome."""
-    # 1) PM first-pass routing → route_request (PM → Boss).
-    route = pm.route_inbound(conn, text, user_id=user_id)
-    route_id = role_messages_repo.record_envelope(conn, route.envelope)
-    request = route.request
+def _route_and_analyze(conn, advisor: Advisor, route: pm.RouteResult):
+    """Record route_request → analyze → analysis_done; return (result, analysis_id).
 
-    # 2) Boss routes route_request → analyze (Boss → Analyzer).
+    The Boss dispatches the (provisional) route to the Analyzer, which validates +
+    classifies it. Both hand-offs are persisted with a causation chain (§6D).
+    """
+    route_id = role_messages_repo.record_envelope(conn, route.envelope)
     analyze_decision = boss.decide(route.envelope)
     analyze_id = _emit_boss(
         conn,
         analyze_decision,
-        request_id=request.id,
+        request_id=route.request.id,
         job_id=None,
         payload=route.card,
         causation_id=route_id,
     )
-
-    # 3) Analyzer validates + classifies → analysis_done (Analyzer → Boss).
     result = analyzer.analyze(conn, advisor, route.card)
     analysis_id = role_messages_repo.record_envelope(conn, result.envelope, causation_id=analyze_id)
+    return result, analysis_id
+
+
+def run_ask(conn, advisor: Advisor, text: str, *, user_id: int | None = None) -> AskOutcome:
+    """Drive one inbound message end-to-end, returning the terminal outcome."""
+    # 0) The user's prior turn → an id-free conversation-context block, so a
+    #    follow-up can resolve references ("the plan", "that URL") whichever
+    #    request it ends up on (§6C). Built once, before routing.
+    prior = requests_repo.get_latest_active_request(conn, user_id) if user_id is not None else None
+    context_text = conversation.render(conversation.build(conn, prior))
+
+    # 1) PM first-pass routing → route_request (PM → Boss). The context rides on
+    #    the card so the Analyzer/Junior/planner all see the prior turn.
+    route = pm.route_inbound(conn, text, user_id=user_id)
+    route.card["context"] = context_text
+
+    # 2-3) Boss → Analyzer validates + classifies.
+    result, analysis_id = _route_and_analyze(conn, advisor, route)
+
+    # 3a) A **provisional** best-guess append is only kept if the Analyzer agrees
+    #     it belongs; otherwise it's really a new request (§6C, Stage 2).
+    if route.provisional:
+        if result.analysis.belongs:
+            # Confirmed continuation → persist the appended detail now.
+            requests_repo.add_request_detail(
+                conn,
+                request_id=route.request.id,
+                content=route.text,
+                source="user",
+                routed_by="pm",
+            )
+        else:
+            # Wrong guess → mint a fresh request and re-classify (no append). The
+            # prior-turn context is kept so references still resolve.
+            route = pm.route_new(conn, text, user_id=user_id)
+            route.card["context"] = context_text
+            result, analysis_id = _route_and_analyze(conn, advisor, route)
+
+    request = route.request
 
     # 4) Boss routes the verdict.
     decision = boss.decide(result.envelope)
@@ -113,6 +149,9 @@ def run_ask(conn, advisor: Advisor, text: str, *, user_id: int | None = None) ->
             payload={"clarify": result.analysis.clarify},
             causation_id=analysis_id,
         )
+        # Mark the request as waiting on the user so their (unprefixed) reply is
+        # threaded back here instead of starting a new request (§6C continuity).
+        requests_repo.set_request_status(conn, request.id, requests_repo.AWAITING_STATUS)
         return AskOutcome(
             status="needs_clarification", request=request, clarify=result.analysis.clarify
         )

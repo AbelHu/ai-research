@@ -69,6 +69,7 @@ def analyze(
         text=card["text"],
         title=card.get("title") or "",
         append=append,
+        context=card.get("context") or "",
         request_id=request_id,
     )
 
@@ -119,6 +120,7 @@ def draft_plan(conn, advisor: Advisor, card: dict, *, job_id: int):
 
     spec = advisor.make_plan(
         goal=card["text"],
+        context=card.get("context") or "",
         request_id=card["request_id"],
         job_id=job_id,
     )

@@ -201,6 +201,7 @@ class Advisor:
         text: str,
         title: str = "",
         append: bool = False,
+        context: str = "",
         request_id: int,
         job_id: int | None = None,
     ) -> Analysis:
@@ -209,8 +210,12 @@ class Advisor:
         Internal identifiers (request id/code, job id) are **never** rendered into
         the prompt — the model classifies on the user's content only. The ids are
         used solely for the deterministic envelope + the `ai_calls` audit row.
+
+        ``context`` is an optional **id-free** summary of the prior turn (the
+        conversation so far); when present the model can judge ``belongs`` and
+        resolve back-references against it (§6C).
         """
-        card = _format_card(text=text, title=title, append=append)
+        card = _format_card(text=text, title=title, append=append, context=context)
         return self._run(
             role="planner",
             template_name="analyzer.analyze",
@@ -233,6 +238,7 @@ class Advisor:
         self,
         *,
         goal: str,
+        context: str = "",
         request_id: int,
         job_id: int | None = None,
     ) -> PlanSpec:
@@ -240,11 +246,14 @@ class Advisor:
 
         No deterministic fallback: a malformed plan **escalates** rather than
         running unvalidated phases/tasks (AI never drives the control path).
+
+        ``context`` carries the id-free prior-turn summary so a plan that refers
+        to earlier info (e.g. "the URL from before") can ground it (§6C).
         """
         return self._run(
             role="planner",
             template_name="analyzer.plan",
-            variables={"goal": goal},
+            variables={"goal": goal, "context": context},
             schema=PlanSpec,
             request_id=request_id,
             job_id=job_id,
@@ -330,6 +339,7 @@ class Advisor:
         *,
         text: str,
         hits: list[dict] | None = None,
+        context: str = "",
         request_id: int,
         job_id: int | None = None,
     ) -> AnswerDraft:
@@ -352,7 +362,11 @@ class Advisor:
         draft = self._run(
             role="drafter",
             template_name="junior.answer",
-            variables={"text": text, "hits": json.dumps(hits or [], ensure_ascii=False)},
+            variables={
+                "text": text,
+                "hits": json.dumps(hits or [], ensure_ascii=False),
+                "context": context,
+            },
             schema=AnswerDraft,
             request_id=request_id,
             job_id=job_id,
@@ -518,16 +532,20 @@ class Advisor:
         return None, "invalid", resp2.text, _tokens(resp2)
 
 
-def _format_card(*, text: str, title: str, append: bool) -> str:
+def _format_card(*, text: str, title: str, append: bool, context: str = "") -> str:
     """Render a minimal RequestCard block for the analyzer prompt (§6D).
 
     Deliberately **omits internal identifiers** (request id/code, job id): the
     model never needs them to classify, and they must not leave the machine in a
-    prompt. Only the user-authored title/text + the append flag are rendered.
+    prompt. Only the user-authored title/text + the append flag are rendered, plus
+    an optional id-free conversation-context block (the prior turn).
     """
     lines = ["Request card:"]
     if title:
         lines.append(f"- title: {title}")
     lines.append(f"- appended detail: {'yes' if append else 'no'}")
     lines.append(f"- text: {text}")
+    if context:
+        lines.append("")
+        lines.append(context)
     return "\n".join(lines)

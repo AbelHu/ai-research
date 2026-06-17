@@ -59,6 +59,10 @@ def _system(conn: sqlite3.Connection) -> tuple[int, object]:
     return 200, {"metrics": services.system_metrics(), "usage": services.model_usage(conn)}
 
 
+def _memories(conn: sqlite3.Connection) -> tuple[int, object]:
+    return 200, services.memories_overview(conn)
+
+
 def _accounts(conn: sqlite3.Connection) -> tuple[int, object]:
     return 200, services.list_paired_accounts(conn)
 
@@ -84,6 +88,7 @@ _ROUTES: list[_Route] = [
     _Route("GET", "/api/requests", _requests_index),
     _Route("GET", "/api/requests/{request_id}", _request_detail),
     _Route("GET", "/api/system", _system),
+    _Route("GET", "/api/memories", _memories),
     _Route("GET", "/api/accounts", _accounts),
     _Route("POST", "/api/accounts/{channel}/{channel_user_id}/revoke", _revoke_account),
 ]
@@ -114,12 +119,20 @@ def _render_index(conn: sqlite3.Connection) -> str:
     usage = services.model_usage(conn)
     metrics = services.system_metrics()
     requests = services.request_overview(conn, limit=50)
+    memories = services.memories_overview(conn, limit=50)
 
     rows = "\n".join(
         f"<tr><td>{_escape(r['code'])}</td><td>{_escape(r['title'])}</td>"
         f"<td>{_escape(r['status'])}</td><td>{_escape(r['state'])}</td>"
         f"<td><a href='/api/requests/{r['id']}'>details</a></td></tr>"
         for r in requests
+    )
+    memory_rows = "\n".join(
+        f"<tr><td>{_escape(m['kind'])}</td>"
+        f"<td>{_escape(m['summary'] or m['preview'])}</td>"
+        f"<td>{_escape(m['importance'])}</td><td>{_escape(m['use_count'])}</td>"
+        f"<td>{_escape(m['last_used_at'])}</td></tr>"
+        for m in memories
     )
     disk = metrics["disk"]
     cpu = metrics["cpu"]
@@ -147,6 +160,10 @@ health at <code>/healthz</code>.</p>
 <h2>Requests ({len(requests)})</h2>
 <table><tr><th>Code</th><th>Title</th><th>Status</th><th>State</th><th></th></tr>
 {rows}
+</table>
+<h2>Memories ({len(memories)})</h2>
+<table><tr><th>Kind</th><th>Summary</th><th>Importance</th><th>Uses</th><th>Last used</th></tr>
+{memory_rows}
 </table>
 </body></html>"""
 

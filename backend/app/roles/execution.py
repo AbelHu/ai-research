@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 from app.advisor.wrapper import Advisor
 from app.memory.reports import FinalReport
-from app.roles import analyzer, coder, company_expert, plan_expert, pm, senior
+from app.roles import analyzer, coder, company_expert, conversation, plan_expert, pm, senior
 from app.roles.envelope import Role
 from app.storage.repos import plans as plans_repo
 from app.storage.repos import requests as requests_repo
@@ -130,6 +130,19 @@ def execute_planned_job(
     if request is None:
         raise ValueError(f"request {request_id} not found")
 
+    # Rebuild the prior-turn context (the background runner picks the job up by id,
+    # so the control loop's context isn't in hand). Lets a plan that refers to
+    # earlier info — e.g. "the gold-price URL from before" — ground it (§6C).
+    if not card.get("context"):
+        prior = (
+            requests_repo.get_latest_active_request(
+                conn, request.user_id, exclude_request_id=request.id
+            )
+            if request.user_id is not None
+            else None
+        )
+        card = {**card, "context": conversation.render(conversation.build(conn, prior))}
+
     # 1) Analyzer drafts + persists the plan (phases → tasks, all New).
     plan = analyzer.draft_plan(conn, advisor, card, job_id=job_id)
 
@@ -142,6 +155,8 @@ def execute_planned_job(
             "proceeding without a sound approach. Could you add detail or adjust "
             "the scope?",
         )
+        # Wait on the user: their next reply threads back here (§6C continuity).
+        requests_repo.set_request_status(conn, request_id, requests_repo.AWAITING_STATUS)
         return JobOutcome(
             status="plan_declined",
             job_id=job_id,
@@ -164,6 +179,8 @@ def execute_planned_job(
                 "I worked through this but a phase needs another look before I "
                 "can finish. I'll follow up rather than deliver something unsound.",
             )
+            # Wait on the user: their next reply threads back here (§6C continuity).
+            requests_repo.set_request_status(conn, request_id, requests_repo.AWAITING_STATUS)
             return JobOutcome(
                 status="phase_escalated",
                 job_id=job_id,

@@ -8,6 +8,7 @@ import pytest
 
 from app.storage.db import connect
 from app.storage.migrations import migrate
+from app.storage.repos import identities as identities_repo
 from app.storage.repos import requests as repo
 
 
@@ -88,3 +89,35 @@ def test_improves_request_link(conn) -> None:
         conn, improves_request_id=origin.id, now=datetime(2026, 6, 14, 12, 0, 1)
     )
     assert improvement.improves_request_id == origin.id
+
+
+def test_set_request_status_sets_and_clears(conn) -> None:
+    req = repo.create_request(conn, title="x")
+    updated = repo.set_request_status(conn, req.id, repo.AWAITING_STATUS)
+    assert updated.status == repo.AWAITING_STATUS
+    assert repo.set_request_status(conn, req.id, None).status is None
+
+
+def test_get_latest_awaiting_request_returns_most_recent_awaiting(conn) -> None:
+    user_id = identities_repo.ensure_owner(conn)
+    awaiting = repo.create_request(
+        conn, title="awaiting", user_id=user_id, now=datetime(2026, 6, 14, 12, 0, 0)
+    )
+    repo.set_request_status(conn, awaiting.id, repo.AWAITING_STATUS)
+    # A newer request that is NOT awaiting must not shadow the awaiting one.
+    repo.create_request(conn, title="other", user_id=user_id, now=datetime(2026, 6, 14, 12, 0, 1))
+
+    found = repo.get_latest_awaiting_request(conn, user_id)
+    assert found is not None and found.id == awaiting.id
+
+
+def test_get_latest_awaiting_request_ignores_archived_and_missing(conn) -> None:
+    user_id = identities_repo.ensure_owner(conn)
+    # No awaiting request at all → None.
+    repo.create_request(conn, user_id=user_id, now=datetime(2026, 6, 14, 12, 0, 0))
+    assert repo.get_latest_awaiting_request(conn, user_id) is None
+    # Awaiting but archived (no longer active) → still None.
+    archived = repo.create_request(conn, user_id=user_id, now=datetime(2026, 6, 14, 12, 0, 1))
+    repo.set_request_status(conn, archived.id, repo.AWAITING_STATUS)
+    repo.set_request_state(conn, archived.id, "archived")
+    assert repo.get_latest_awaiting_request(conn, user_id) is None

@@ -15,6 +15,7 @@ import pytest
 from app.storage.db import connect
 from app.storage.migrations import migrate
 from app.storage.repos import identities as identities_repo
+from app.storage.repos import memories as memories_repo
 from app.storage.repos import requests as requests_repo
 from app.web.app import create_app
 
@@ -93,6 +94,17 @@ def test_index_auto_refreshes(conn) -> None:
     assert "Auto-refreshes" in text
 
 
+def test_index_shows_memories(conn) -> None:
+    memories_repo.create_memory(
+        conn, content="c", summary="dark mode preference", kind="preference"
+    )
+    app = create_app(conn)
+    _, _, body = _call(app, "GET", "/")
+    text = body.decode("utf-8")
+    assert "<h2>Memories" in text
+    assert "dark mode preference" in text
+
+
 def test_index_escapes_html(conn) -> None:
     requests_repo.create_request(conn, title="<script>alert(1)</script>")
     app = create_app(conn)
@@ -133,6 +145,16 @@ def test_api_system(conn) -> None:
     assert code == 200
     assert "metrics" in data and "usage" in data
     assert "cpu" in data["metrics"] and "disk" in data["metrics"]
+
+
+def test_api_memories(conn) -> None:
+    memories_repo.create_memory(
+        conn, content="remember the gold price url", summary="gold price source", kind="fact"
+    )
+    app = create_app(conn)
+    code, data = _json(app, "GET", "/api/memories")
+    assert code == 200
+    assert any(m["summary"] == "gold price source" for m in data)
 
 
 def test_api_accounts_and_revoke(conn) -> None:

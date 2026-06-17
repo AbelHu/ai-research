@@ -8,6 +8,8 @@ expert signs the plan off before anything runs.
 Goal:
 {{ goal }}
 
+{{ context }}
+
 Respond with a **single JSON object** only:
 - `phases`: a non-empty array of phase objects, in execution order. Each phase:
   - `title`: a short phase name.

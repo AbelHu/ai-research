@@ -49,6 +49,16 @@ ANALYSIS_UNCLEAR = json.dumps(
         "clarify": ["which thing do you mean?"],
     }
 )
+ANALYSIS_NOT_BELONGS = json.dumps(
+    {
+        "belongs": False,
+        "kind": "ask",
+        "clarity": "clear",
+        "complexity": "simple",
+        "confidence": 0.9,
+        "rationale": "a distinct, unrelated question",
+    }
+)
 ANSWER = json.dumps(
     {
         "answer": "Paris is the capital of France.",
@@ -189,3 +199,71 @@ def test_owner_is_created_once(conn) -> None:
     assert first == second
     count = conn.execute("SELECT COUNT(*) FROM users WHERE is_owner = 1").fetchone()[0]
     assert count == 1
+
+
+# --- follow-up continuity (§6C): is the new message for the last request? ----
+
+
+def test_followup_threads_when_analyzer_confirms_belongs(conn) -> None:
+    # A follow-up the Analyzer says *belongs* continues the same request: the
+    # provisional append is confirmed and persisted (no new request minted).
+    user_id = ensure_owner(conn)
+    advisor = _advisor(conn, planner=ANALYSIS_ASK)  # belongs=True for every turn
+
+    first = run_ask(conn, advisor, "what is the capital of France?", user_id=user_id)
+    second = run_ask(conn, advisor, "and what is its population?", user_id=user_id)
+
+    assert second.request.id == first.request.id  # same thread
+    assert len(requests_repo.list_requests(conn)) == 1  # no second request minted
+    details = requests_repo.list_request_details(conn, first.request.id)
+    assert [d["content"] for d in details] == ["and what is its population?"]
+
+
+def test_followup_starts_new_request_when_not_belongs(conn) -> None:
+    # A follow-up the Analyzer says does NOT belong is undone and re-routed to a
+    # fresh request (the provisional detail is never persisted on the old one).
+    user_id = ensure_owner(conn)
+    # Seed memory so turn 1 answers from memory (no research loop consuming a
+    # planner response), keeping the scripted analyze sequence aligned.
+    memories_repo.create_memory(conn, content="the capital of France is Paris")
+    providers = {
+        # turn 1 (belongs), turn 2 provisional (not belongs) → re-analyze new (belongs)
+        "planner": FakeProvider([ANALYSIS_ASK, ANALYSIS_NOT_BELONGS, ANALYSIS_ASK]),
+        "drafter": FakeProvider(ANSWER),
+    }
+    advisor = Advisor(resolve_provider=lambda role: providers[role], conn=conn)
+
+    first = run_ask(conn, advisor, "what is the capital of France?", user_id=user_id)
+    second = run_ask(conn, advisor, "tell me a totally different joke", user_id=user_id)
+
+    assert second.request.id != first.request.id  # a brand-new request
+    assert len(requests_repo.list_requests(conn)) == 2
+    # The wrong provisional guess left no detail on the first request.
+    assert requests_repo.list_request_details(conn, first.request.id) == []
+
+
+def test_followup_context_carries_prior_answer_into_prompt(conn) -> None:
+    # Requirement 2/3: a follow-up referencing the previous answer gets that
+    # answer as context, so the model can resolve "the URL" etc.
+    user_id = ensure_owner(conn)
+    prior_answer = json.dumps(
+        {
+            "answer": "The gold price is published at https://goldapi.io/spot.",
+            "citations": [{"ref": "https://goldapi.io/spot", "title": "Gold API"}],
+            "confidence": 0.9,
+        }
+    )
+    planner = FakeProvider(ANALYSIS_ASK)
+    providers = {"planner": planner, "drafter": FakeProvider([prior_answer, ANSWER])}
+    advisor = Advisor(resolve_provider=lambda role: providers[role], conn=conn)
+
+    run_ask(conn, advisor, "what's the gold price", user_id=user_id)
+    run_ask(conn, advisor, "use the url from before", user_id=user_id)
+
+    # The prior answer (with the URL) is carried as context into the 2nd turn's
+    # prompts, so the model can resolve "the url from before".
+    planner_prompts = " ".join(str(c.messages) for c in planner.calls)
+    assert "goldapi.io" in planner_prompts
+    assert "previous turn" in planner_prompts
+    # The Junior's answer prompt also receives the prior-answer context.
+    assert "goldapi.io" in str(providers["drafter"].calls[-1].messages)

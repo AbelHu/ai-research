@@ -147,7 +147,8 @@ process it:
   then delivers the result back to the originating chat, quoting your original
   message and tagged with its `/req` id, and
 * serves a read-only **dashboard + JSON API** — requests, the
-  job→plan→phase→task tree, host/model usage, and paired accounts.
+  job→plan→phase→task tree, host/model usage, stored memories, and paired
+  accounts.
 
 It runs on the **stdlib** (no extra dependency) and **blocks until Ctrl+C**:
 
@@ -181,6 +182,7 @@ hand:
 | `GET /api/requests` | request index (newest first) |
 | `GET /api/requests/<id>` | one request's job→plan→phase→task tree + steps + `ai_calls` |
 | `GET /api/system` | host metrics (CPU/mem/disk) + model usage from `ai_calls` |
+| `GET /api/memories` | the active memories (newest first) — kind, summary, importance, use count |
 | `GET /api/accounts` | the paired-account allowlist |
 | `POST /api/accounts/<channel>/<user>/revoke` | revoke an account |
 

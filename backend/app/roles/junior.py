@@ -190,6 +190,7 @@ def answer_ask(
         draft: AnswerDraft | None = advisor.answer(
             text=card["text"],
             hits=hits,
+            context=card.get("context") or "",
             request_id=card["request_id"],
             job_id=job_id,
         )

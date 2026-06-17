@@ -7,8 +7,10 @@ import pytest
 from app.advisor.schemas import Source
 from app.roles.envelope import Action, Role
 from app.roles.pm import format_delivery, route_inbound
+from app.roles.pm import route_new as pm_route_new
 from app.storage.db import connect
 from app.storage.migrations import migrate
+from app.storage.repos import identities as identities_repo
 from app.storage.repos import requests as requests_repo
 
 
@@ -59,6 +61,45 @@ def test_unknown_req_code_mints_new(conn) -> None:
     result = route_inbound(conn, "/req 19990101000000 stray message")
     assert result.append is False
     assert result.request.code != "19990101000000"
+
+
+def test_unprefixed_followup_threads_to_awaiting_request(conn) -> None:
+    user_id = identities_repo.ensure_owner(conn)
+    first = route_inbound(conn, "implement a gold-price skill", user_id=user_id)
+    # The pipeline asked the user for more detail (clarify / declined plan).
+    requests_repo.set_request_status(conn, first.request.id, requests_repo.AWAITING_STATUS)
+
+    # A plain follow-up (no /req marker) attaches to the awaiting request.
+    result = route_inbound(conn, "here is the extra detail you asked for", user_id=user_id)
+    assert result.append is True
+    assert result.request.id == first.request.id
+    details = requests_repo.list_request_details(conn, first.request.id)
+    assert [d["content"] for d in details] == ["here is the extra detail you asked for"]
+    # The awaiting flag is cleared once the reply is received (turn handed back).
+    assert requests_repo.get_request(conn, first.request.id).status is None
+
+
+def test_unprefixed_followup_provisionally_appends_to_current_thread(conn) -> None:
+    user_id = identities_repo.ensure_owner(conn)
+    first = route_inbound(conn, "what is the capital of France?", user_id=user_id)
+    # A later message best-guesses a continuation of the current thread: a
+    # PROVISIONAL append (detail not yet persisted) the Analyzer must confirm.
+    result = route_inbound(conn, "what about Spain?", user_id=user_id)
+    assert result.append is True
+    assert result.provisional is True
+    assert result.request.id == first.request.id
+    assert result.detail_id is None  # not persisted until `belongs` is confirmed
+    # Nothing was written under the first request yet (the guess is provisional).
+    assert requests_repo.list_request_details(conn, first.request.id) == []
+
+
+def test_route_new_mints_fresh_request(conn) -> None:
+    user_id = identities_repo.ensure_owner(conn)
+    first = route_inbound(conn, "first question", user_id=user_id)
+    fresh = pm_route_new(conn, "an unrelated new question", user_id=user_id)
+    assert fresh.append is False
+    assert fresh.provisional is False
+    assert fresh.request.id != first.request.id
 
 
 def test_title_is_truncated(conn) -> None:

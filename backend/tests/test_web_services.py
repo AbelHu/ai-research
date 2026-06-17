@@ -14,6 +14,7 @@ from app.storage.db import connect
 from app.storage.migrations import migrate
 from app.storage.repos import ai_calls as ai_calls_repo
 from app.storage.repos import identities as identities_repo
+from app.storage.repos import memories as memories_repo
 from app.storage.repos import plans as plans_repo
 from app.storage.repos import requests as requests_repo
 from app.storage.repos import steps as steps_repo
@@ -188,3 +189,32 @@ def test_list_and_revoke_paired_accounts(conn) -> None:
     assert after["42"]["state"] == "revoked"
     # Revoking again is a no-op.
     assert services.revoke_account(conn, "telegram", "42") is False
+
+
+# --- Memory page (§9.1) -----------------------------------------------------
+
+
+def test_memories_overview_lists_active_only(conn) -> None:
+    active = memories_repo.create_memory(
+        conn, content="user prefers dark mode", summary="prefers dark mode", kind="preference"
+    )
+    archived = memories_repo.create_memory(conn, content="stale fact", kind="fact")
+    memories_repo.archive_memory(conn, archived.id)
+
+    rows = services.memories_overview(conn)
+    by_id = {r["id"]: r for r in rows}
+    assert archived.id not in by_id  # cold (archived) memories stay out of the live view
+    assert by_id[active.id]["summary"] == "prefers dark mode"
+    assert by_id[active.id]["kind"] == "preference"
+    assert by_id[active.id]["preview"] == "user prefers dark mode"
+
+
+def test_memories_overview_newest_first_and_preview_truncates(conn) -> None:
+    memories_repo.create_memory(conn, content="first", kind="fact")
+    long_text = "x" * 400
+    newest = memories_repo.create_memory(conn, content=long_text, kind="fact")
+
+    rows = services.memories_overview(conn)
+    assert rows[0]["id"] == newest.id  # newest first
+    assert rows[0]["preview"].endswith("…")
+    assert len(rows[0]["preview"]) <= services._MEMORY_PREVIEW_LEN + 1  # +1 for the ellipsis

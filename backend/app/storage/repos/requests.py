@@ -17,6 +17,12 @@ from datetime import datetime
 # Width of the zero-padded same-second tie-break suffix (e.g. "-01").
 _SUFFIX_WIDTH = 2
 
+# `requests.status` value meaning "this request is waiting on the user's reply"
+# — set when the Analyzer asks for clarification or a job's plan is declined, so
+# the PM can thread an unprefixed follow-up back to it instead of minting a new
+# request (design-spec §6C continuity).
+AWAITING_STATUS = "awaiting_user"
+
 
 @dataclass(frozen=True)
 class Request:
@@ -144,6 +150,66 @@ def set_request_state(conn: sqlite3.Connection, request_id: int, state: str) -> 
     updated = get_request(conn, request_id)
     assert updated is not None
     return updated
+
+
+def set_request_status(conn: sqlite3.Connection, request_id: int, status: str | None) -> Request:
+    """Set (or clear, with ``None``) a request's free-form ``status`` (§6C).
+
+    Distinct from ``state`` (the active/archived/dropped lifecycle): ``status``
+    flags transient progress — notably :data:`AWAITING_STATUS`, set when the
+    request is waiting on the user's reply so a follow-up can be threaded back to
+    it.
+    """
+    with conn:
+        conn.execute("UPDATE requests SET status = ? WHERE id = ?", (status, request_id))
+    updated = get_request(conn, request_id)
+    assert updated is not None
+    return updated
+
+
+def get_latest_awaiting_request(conn: sqlite3.Connection, user_id: int) -> Request | None:
+    """Return the user's most recent **active** request awaiting their reply.
+
+    Used by the PM to thread an unprefixed follow-up (no ``/req`` marker) back to
+    the request that asked the user for clarification or a declined plan, instead
+    of minting a brand-new request and losing the thread (§6C continuity).
+    """
+    row = conn.execute(
+        "SELECT * FROM requests "
+        "WHERE user_id = ? AND state = 'active' AND status = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (user_id, AWAITING_STATUS),
+    ).fetchone()
+    return Request.from_row(row) if row else None
+
+
+def get_latest_active_request(
+    conn: sqlite3.Connection,
+    user_id: int,
+    *,
+    exclude_request_id: int | None = None,
+) -> Request | None:
+    """Return the user's most recent **active** request (the "current thread").
+
+    Unlike :func:`get_latest_awaiting_request` this ignores ``status`` — it's the
+    last thing the user worked on, used to (a) best-guess whether a new message
+    continues it and (b) build the conversation context so references like "the
+    plan"/"that URL" resolve to the prior turn (§6C). ``exclude_request_id`` skips
+    a request (e.g. the one currently being routed) to find the **prior** turn.
+    """
+    if exclude_request_id is None:
+        row = conn.execute(
+            "SELECT * FROM requests WHERE user_id = ? AND state = 'active' "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM requests WHERE user_id = ? AND state = 'active' AND id != ? "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id, exclude_request_id),
+        ).fetchone()
+    return Request.from_row(row) if row else None
 
 
 def list_requests(

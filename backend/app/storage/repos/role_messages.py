@@ -76,6 +76,29 @@ def list_role_messages(conn: sqlite3.Connection, request_id: int) -> list[sqlite
     ).fetchall()
 
 
+def get_last_answer_text(conn: sqlite3.Connection, request_id: int) -> str | None:
+    """Return the most recent **answer text** delivered for a request, if any.
+
+    Scans the request's envelopes newest-first for one whose payload carries an
+    ``answer`` object (the Junior's ``ask_done`` / the PM ``deliver`` hand-off)
+    and returns its ``answer`` string. Used to build the conversation context so
+    a follow-up can resolve references to "the previous answer" (§6C). Returns
+    ``None`` when the request has produced no answer yet.
+    """
+    rows = conn.execute(
+        "SELECT payload_json FROM role_messages WHERE request_id = ? ORDER BY id DESC",
+        (request_id,),
+    ).fetchall()
+    for row in rows:
+        if not row["payload_json"]:
+            continue
+        payload = json.loads(row["payload_json"])
+        answer = payload.get("answer")
+        if isinstance(answer, dict) and answer.get("answer"):
+            return str(answer["answer"])
+    return None
+
+
 def update_status(conn: sqlite3.Connection, message_id: int, status: str) -> None:
     with conn:
         conn.execute(

@@ -24,6 +24,7 @@ from collections.abc import Callable
 
 from app.storage.repos import ai_calls as ai_calls_repo
 from app.storage.repos import identities as identities_repo
+from app.storage.repos import memories as memories_repo
 from app.storage.repos import plans as plans_repo
 from app.storage.repos import requests as requests_repo
 from app.storage.repos import steps as steps_repo
@@ -269,6 +270,48 @@ def system_metrics(
     }
 
     return {"cpu": cpu, "memory": memory, "disk": disk}
+
+
+# --- Memory page: stored memories (§9, §9.1) --------------------------------
+
+_MEMORY_PREVIEW_LEN = 280
+
+
+def _preview(content: str | None) -> str | None:
+    """A short, single-purpose preview of a memory's content for the list view."""
+    if not content:
+        return None
+    text = content.strip()
+    if len(text) <= _MEMORY_PREVIEW_LEN:
+        return text
+    return text[:_MEMORY_PREVIEW_LEN].rstrip() + "…"
+
+
+def memories_overview(conn: sqlite3.Connection, *, limit: int = 200) -> list[dict]:
+    """List **active** memories newest-first for the dashboard Memory page (§9.1).
+
+    Returns JSON-friendly rows: the summary (or a content preview) plus the
+    recall signals the weighting uses (importance, confidence, use_count,
+    retention_class). Archived/dropped (cold) memories stay out of the live
+    view, mirroring recall.
+    """
+    memories = sorted(memories_repo.list_active(conn), key=lambda m: m.id, reverse=True)[:limit]
+    return [
+        {
+            "id": m.id,
+            "kind": m.kind,
+            "entity_key": m.entity_key,
+            "summary": m.summary,
+            "preview": _preview(m.content),
+            "importance": m.importance,
+            "confidence": m.confidence,
+            "use_count": m.use_count,
+            "retention_class": m.retention_class,
+            "last_used_at": m.last_used_at,
+            "created_at": m.created_at,
+        }
+        for m in memories
+    ]
 
 
 # --- Settings page: paired accounts (T10.5) ---------------------------------

@@ -108,6 +108,8 @@ def test_plan_declined_stops_and_reports(conn) -> None:
     # The plan stayed New (never approved); nothing executed.
     plan = plans_repo.get_plan_for_job(conn, job.id)
     assert plan.status == "New"
+    # The request now awaits the user's reply so a follow-up threads back to it.
+    assert requests_repo.get_request(conn, req.id).status == requests_repo.AWAITING_STATUS
 
 
 def test_phase_decline_escalates(conn) -> None:
@@ -119,6 +121,8 @@ def test_phase_decline_escalates(conn) -> None:
 
     assert outcome.status == "phase_escalated"
     assert outcome.delivery is not None and "needs another look" in outcome.delivery
+    # The request awaits the user's reply so a follow-up threads back to it.
+    assert requests_repo.get_request(conn, req.id).status == requests_repo.AWAITING_STATUS
 
 
 def test_card_for_job_reconstructs_from_db(conn) -> None:
