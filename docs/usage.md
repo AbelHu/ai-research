@@ -181,8 +181,8 @@ hand:
 | `GET /healthz` | `{"status":"ok"}` liveness probe |
 | `GET /api/requests` | request index (newest first) |
 | `GET /api/requests/<id>` | one request's job→plan→phase→task tree + steps + `ai_calls` |
-| `GET /api/system` | host metrics (CPU/mem/disk) + model usage from `ai_calls` |
-| `GET /api/memories` | the active memories (newest first) — kind, summary, importance, use count |
+| `GET /api/system` | host metrics (CPU/mem/disk) + model usage from `ai_calls` (including per-model tokens and Tavily credits used today) |
+| `GET /api/memories` | the active memories (newest first) — kind, summary, preview, importance, confidence, use count, retention, source, last used, expires |
 | `GET /api/accounts` | the paired-account allowlist |
 | `POST /api/accounts/<channel>/<user>/revoke` | revoke an account |
 

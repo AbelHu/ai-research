@@ -129,11 +129,23 @@ def _render_index(conn: sqlite3.Connection) -> str:
     )
     memory_rows = "\n".join(
         f"<tr><td>{_escape(m['kind'])}</td>"
-        f"<td>{_escape(m['summary'] or m['preview'])}</td>"
-        f"<td>{_escape(m['importance'])}</td><td>{_escape(m['use_count'])}</td>"
-        f"<td>{_escape(m['last_used_at'])}</td></tr>"
+        f"<td>{_escape(m['summary'] or '—')}</td>"
+        f"<td>{_escape(m['preview'])}</td>"
+        f"<td>{_escape(m['importance'])}</td><td>{_escape(m['confidence'])}</td>"
+        f"<td>{_escape(m['use_count'])}</td>"
+        f"<td>{_escape(m['retention_class'])}</td>"
+        f"<td>{_escape(m['source_ref'])}</td>"
+        f"<td>{_escape(m['last_used_at'])}</td>"
+        f"<td>{_escape(m['expires_at'])}</td></tr>"
         for m in memories
     )
+    model_rows = "\n".join(
+        f"<tr><td>{_escape(m['model_id'])}</td><td>{_escape(m['calls'])}</td>"
+        f"<td>{_escape(m['tokens'])}</td><td>{_escape(m['avg_latency_ms'])}</td></tr>"
+        for m in usage["by_model"]
+    )
+    if not model_rows:
+        model_rows = "<tr><td colspan='4' class='muted'>No AI calls yet.</td></tr>"
     disk = metrics["disk"]
     cpu = metrics["cpu"]
     cpu_line = (
@@ -154,15 +166,21 @@ health at <code>/healthz</code>.</p>
 <h2>System</h2>
 <ul>
 <li>Model calls: {usage["total_calls"]} ({usage["total_tokens"]} tokens)</li>
+<li>Tavily credits used today: {_escape(usage['web_search_credits_used_today'])}</li>
 {cpu_line}
 <li>Disk: {_escape(disk["percent"])}% used</li>
 </ul>
+<h3>AI Model Token Usage</h3>
+<table><tr><th>Model</th><th>Calls</th><th>Tokens</th><th>Avg latency (ms)</th></tr>
+{model_rows}
+</table>
 <h2>Requests ({len(requests)})</h2>
 <table><tr><th>Code</th><th>Title</th><th>Status</th><th>State</th><th></th></tr>
 {rows}
 </table>
 <h2>Memories ({len(memories)})</h2>
-<table><tr><th>Kind</th><th>Summary</th><th>Importance</th><th>Uses</th><th>Last used</th></tr>
+<p class="muted">Full memory details are available in JSON at <a href="/api/memories">/api/memories</a>.</p>
+<table><tr><th>Kind</th><th>Summary</th><th>Preview</th><th>Importance</th><th>Confidence</th><th>Uses</th><th>Retention</th><th>Source</th><th>Last used</th><th>Expires</th></tr>
 {memory_rows}
 </table>
 </body></html>"""

@@ -17,6 +17,8 @@ from app.storage.migrations import migrate
 from app.storage.repos import identities as identities_repo
 from app.storage.repos import memories as memories_repo
 from app.storage.repos import requests as requests_repo
+from app.storage.repos import ai_calls as ai_calls_repo
+from app.storage.repos import api_usage as api_usage_repo
 from app.web.app import create_app
 
 
@@ -76,6 +78,16 @@ def test_healthz(conn) -> None:
 
 def test_index_is_html(conn) -> None:
     requests_repo.create_request(conn, title="hello world")
+    req = requests_repo.create_request(conn, title="usage seed")
+    ai_calls_repo.record_ai_call(
+        conn,
+        request_id=req.id,
+        model_id="gpt-4o",
+        tokens=123,
+        latency_ms=900,
+        validation_status="valid",
+    )
+    api_usage_repo.increment(conn, "tavily", amount=2)
     app = create_app(conn)
     code, headers, body = _call(app, "GET", "/")
     assert code == 200
@@ -83,6 +95,10 @@ def test_index_is_html(conn) -> None:
     text = body.decode("utf-8")
     assert "<title>Assistant dashboard</title>" in text
     assert "hello world" in text  # the request shows in the table
+    assert "Tavily credits used today: 2" in text
+    assert "AI Model Token Usage" in text
+    assert "gpt-4o" in text
+    assert "123" in text
 
 
 def test_index_auto_refreshes(conn) -> None:
@@ -96,13 +112,22 @@ def test_index_auto_refreshes(conn) -> None:
 
 def test_index_shows_memories(conn) -> None:
     memories_repo.create_memory(
-        conn, content="c", summary="dark mode preference", kind="preference"
+        conn,
+        content="user prefers compact cards in dashboard",
+        summary="dark mode preference",
+        kind="preference",
+        confidence=0.9,
+        retention_class="short",
+        source_ref="https://example.com/preferences",
     )
     app = create_app(conn)
     _, _, body = _call(app, "GET", "/")
     text = body.decode("utf-8")
     assert "<h2>Memories" in text
     assert "dark mode preference" in text
+    assert "user prefers compact cards in dashboard" in text
+    assert "https://example.com/preferences" in text
+    assert "/api/memories" in text
 
 
 def test_index_escapes_html(conn) -> None:
@@ -140,11 +165,13 @@ def test_api_request_detail_and_404(conn) -> None:
 
 
 def test_api_system(conn) -> None:
+    api_usage_repo.increment(conn, "tavily", amount=1)
     app = create_app(conn)
     code, data = _json(app, "GET", "/api/system")
     assert code == 200
     assert "metrics" in data and "usage" in data
     assert "cpu" in data["metrics"] and "disk" in data["metrics"]
+    assert "web_search_credits_used_today" in data["usage"]
 
 
 def test_api_memories(conn) -> None:

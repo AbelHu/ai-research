@@ -13,6 +13,7 @@ from app.advisor.schemas import PhaseSpec, PlanSpec, TaskSpec
 from app.storage.db import connect
 from app.storage.migrations import migrate
 from app.storage.repos import ai_calls as ai_calls_repo
+from app.storage.repos import api_usage as api_usage_repo
 from app.storage.repos import identities as identities_repo
 from app.storage.repos import memories as memories_repo
 from app.storage.repos import plans as plans_repo
@@ -124,6 +125,13 @@ def test_model_usage_aggregates_ai_calls(conn) -> None:
     assert by_model["gpt-4o"]["tokens"] == 300
     assert by_model["gpt-4o"]["avg_latency_ms"] == 2000.0
     assert usage["by_validation_status"] == {"valid": 2, "repaired": 1}
+    assert usage["web_search_credits_used_today"] == 0
+
+
+def test_model_usage_includes_tavily_credit_usage(conn) -> None:
+    api_usage_repo.increment(conn, "tavily", amount=3)
+    usage = services.model_usage(conn)
+    assert usage["web_search_credits_used_today"] == 3
 
 
 def test_model_usage_empty(conn) -> None:
@@ -131,6 +139,7 @@ def test_model_usage_empty(conn) -> None:
     assert usage["total_calls"] == 0
     assert usage["total_tokens"] == 0
     assert usage["by_model"] == []
+    assert usage["web_search_credits_used_today"] == 0
 
 
 # --- System page: host metrics (T10.3) --------------------------------------

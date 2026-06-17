@@ -23,6 +23,7 @@ import sqlite3
 from collections.abc import Callable
 
 from app.storage.repos import ai_calls as ai_calls_repo
+from app.storage.repos import api_usage as api_usage_repo
 from app.storage.repos import identities as identities_repo
 from app.storage.repos import memories as memories_repo
 from app.storage.repos import plans as plans_repo
@@ -180,12 +181,14 @@ def model_usage(conn: sqlite3.Connection) -> dict:
     totals_row = conn.execute(
         "SELECT COUNT(*) AS calls, COALESCE(SUM(tokens), 0) AS tokens FROM ai_calls"
     ).fetchone()
+    tavily_used_today = api_usage_repo.count_today(conn, "tavily")
 
     return {
         "total_calls": totals_row["calls"],
         "total_tokens": totals_row["tokens"],
         "by_model": by_model,
         "by_validation_status": by_status,
+        "web_search_credits_used_today": tavily_used_today,
     }
 
 
@@ -307,7 +310,9 @@ def memories_overview(conn: sqlite3.Connection, *, limit: int = 200) -> list[dic
             "confidence": m.confidence,
             "use_count": m.use_count,
             "retention_class": m.retention_class,
+            "source_ref": m.source_ref,
             "last_used_at": m.last_used_at,
+            "expires_at": m.expires_at,
             "created_at": m.created_at,
         }
         for m in memories
