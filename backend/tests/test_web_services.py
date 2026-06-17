@@ -126,12 +126,14 @@ def test_model_usage_aggregates_ai_calls(conn) -> None:
     assert by_model["gpt-4o"]["avg_latency_ms"] == 2000.0
     assert usage["by_validation_status"] == {"valid": 2, "repaired": 1}
     assert usage["web_search_credits_used_today"] == 0
+    assert usage["web_search_credits_total"] == 0
 
 
 def test_model_usage_includes_tavily_credit_usage(conn) -> None:
     api_usage_repo.increment(conn, "tavily", amount=3)
     usage = services.model_usage(conn)
     assert usage["web_search_credits_used_today"] == 3
+    assert usage["web_search_credits_total"] == 3
 
 
 def test_model_usage_empty(conn) -> None:
@@ -140,6 +142,74 @@ def test_model_usage_empty(conn) -> None:
     assert usage["total_tokens"] == 0
     assert usage["by_model"] == []
     assert usage["web_search_credits_used_today"] == 0
+    assert usage["web_search_credits_total"] == 0
+
+
+def test_usage_aggregate_groups_by_day_and_custom_range(conn) -> None:
+    req = requests_repo.create_request(conn, title="usage range")
+    first = ai_calls_repo.record_ai_call(
+        conn,
+        request_id=req.id,
+        model_id="gpt-4o",
+        tokens=100,
+    )
+    second = ai_calls_repo.record_ai_call(
+        conn,
+        request_id=req.id,
+        model_id="gpt-4o-mini",
+        tokens=50,
+    )
+    with conn:
+        conn.execute("UPDATE ai_calls SET created_at = ? WHERE id = ?", ("2026-06-01", first))
+        conn.execute("UPDATE ai_calls SET created_at = ? WHERE id = ?", ("2026-06-02", second))
+    api_usage_repo.increment(conn, "tavily", day="2026-06-01", amount=2)
+    api_usage_repo.increment(conn, "tavily", day="2026-06-02", amount=1)
+
+    usage = services.usage_aggregate(
+        conn,
+        bucket="day",
+        start="2026-06-01",
+        end="2026-06-02",
+    )
+    assert usage["bucket"] == "day"
+    assert usage["range"] == {"start": "2026-06-01", "end": "2026-06-02"}
+    assert usage["totals"]["tokens"] == 150
+    assert usage["totals"]["tavily_credits"] == 3
+    assert usage["totals"]["model_calls"] == 2
+    assert len(usage["credits_by_bucket"]) == 2
+    assert len(usage["tokens_by_bucket"]) == 2
+
+
+def test_usage_aggregate_groups_by_month(conn) -> None:
+    req = requests_repo.create_request(conn, title="usage month")
+    first = ai_calls_repo.record_ai_call(
+        conn,
+        request_id=req.id,
+        model_id="gpt-4o",
+        tokens=70,
+    )
+    second = ai_calls_repo.record_ai_call(
+        conn,
+        request_id=req.id,
+        model_id="gpt-4o",
+        tokens=30,
+    )
+    with conn:
+        conn.execute("UPDATE ai_calls SET created_at = ? WHERE id = ?", ("2026-05-15", first))
+        conn.execute("UPDATE ai_calls SET created_at = ? WHERE id = ?", ("2026-06-15", second))
+    api_usage_repo.increment(conn, "tavily", day="2026-05-15", amount=1)
+    api_usage_repo.increment(conn, "tavily", day="2026-06-15", amount=2)
+
+    usage = services.usage_aggregate(
+        conn,
+        bucket="month",
+        start="2026-05-01",
+        end="2026-06-30",
+    )
+    assert usage["bucket"] == "month"
+    assert [r["bucket"] for r in usage["credits_by_bucket"]] == ["2026-05", "2026-06"]
+    assert usage["totals"]["tokens"] == 100
+    assert usage["totals"]["tavily_credits"] == 3
 
 
 # --- System page: host metrics (T10.3) --------------------------------------

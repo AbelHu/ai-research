@@ -176,12 +176,24 @@ JSON API directly (handy for scripting/testing). The HTML dashboard
 **auto-refreshes every 10 seconds** so the data stays live without reloading by
 hand:
 
+HTML pages (linked from the homepage nav):
+
+| Page | Purpose |
+|------|---------|
+| `GET /` | homepage with quick system snapshot + links |
+| `GET /requests` | request list with links to `GET /api/requests/<id>` |
+| `GET /memories` | detailed memory table |
+| `GET /usage` | token/credit usage tables |
+| `GET /accounts` | paired/revoked account table |
+
 | Route | Returns |
 |-------|---------|
 | `GET /healthz` | `{"status":"ok"}` liveness probe |
 | `GET /api/requests` | request index (newest first) |
 | `GET /api/requests/<id>` | one request's job→plan→phase→task tree + steps + `ai_calls` |
-| `GET /api/system` | host metrics (CPU/mem/disk) + model usage from `ai_calls` (including per-model tokens and Tavily credits used today) |
+| `GET /api/system` | host metrics (CPU/mem/disk) + model usage from `ai_calls` (including per-model tokens and Tavily credits used today + all-time total) |
+| `GET /api/usage?bucket=day|week|month&days=N` | aggregated Tavily credits + AI calls/tokens over the last N days/weeks/months |
+| `GET /api/usage?bucket=day|week|month&start=YYYY-MM-DD&end=YYYY-MM-DD` | aggregated Tavily credits + AI calls/tokens over a specific duration |
 | `GET /api/memories` | the active memories (newest first) — kind, summary, preview, importance, confidence, use count, retention, source, last used, expires |
 | `GET /api/accounts` | the paired-account allowlist |
 | `POST /api/accounts/<channel>/<user>/revoke` | revoke an account |

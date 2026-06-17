@@ -21,6 +21,7 @@ import os
 import shutil
 import sqlite3
 from collections.abc import Callable
+from datetime import date, timedelta
 
 from app.storage.repos import ai_calls as ai_calls_repo
 from app.storage.repos import api_usage as api_usage_repo
@@ -182,6 +183,10 @@ def model_usage(conn: sqlite3.Connection) -> dict:
         "SELECT COUNT(*) AS calls, COALESCE(SUM(tokens), 0) AS tokens FROM ai_calls"
     ).fetchone()
     tavily_used_today = api_usage_repo.count_today(conn, "tavily")
+    tavily_total_row = conn.execute(
+        "SELECT COALESCE(SUM(count), 0) AS total FROM api_usage WHERE provider = ?",
+        ("tavily",),
+    ).fetchone()
 
     return {
         "total_calls": totals_row["calls"],
@@ -189,6 +194,113 @@ def model_usage(conn: sqlite3.Connection) -> dict:
         "by_model": by_model,
         "by_validation_status": by_status,
         "web_search_credits_used_today": tavily_used_today,
+        "web_search_credits_total": int(tavily_total_row["total"]),
+    }
+
+
+_USAGE_BUCKETS = {"day", "week", "month"}
+
+
+def _bucket_expr(bucket: str, column: str) -> str:
+    if bucket == "day":
+        return f"date({column})"
+    if bucket == "week":
+        return f"strftime('%Y-W%W', {column})"
+    return f"strftime('%Y-%m', {column})"
+
+
+def _resolve_range(
+    *, bucket: str, days: int | None = None, start: str | None = None, end: str | None = None
+) -> tuple[str, str]:
+    """Resolve an inclusive date range for usage aggregation queries."""
+    today = date.today()
+    if start and end:
+        return start, end
+    if days is not None:
+        span = max(1, int(days))
+        return (today - timedelta(days=span - 1)).isoformat(), today.isoformat()
+    if bucket == "day":
+        return (today - timedelta(days=29)).isoformat(), today.isoformat()
+    if bucket == "week":
+        return (today - timedelta(days=7 * 11)).isoformat(), today.isoformat()
+    return date(today.year - 1, today.month, 1).isoformat(), today.isoformat()
+
+
+def usage_aggregate(
+    conn: sqlite3.Connection,
+    *,
+    bucket: str = "day",
+    days: int | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict:
+    """Aggregate Tavily credits and AI tokens over day/week/month or custom ranges.
+
+    `bucket` controls grouping (`day|week|month`). Range is either explicit
+    (`start` + `end`, inclusive, YYYY-MM-DD) or derived from `days`.
+    """
+    if bucket not in _USAGE_BUCKETS:
+        raise ValueError(f"invalid bucket: {bucket}")
+    start_date, end_date = _resolve_range(bucket=bucket, days=days, start=start, end=end)
+
+    credit_bucket = _bucket_expr(bucket, "day")
+    credits = [
+        {"bucket": row["bucket"], "credits": row["credits"]}
+        for row in conn.execute(
+            f"SELECT {credit_bucket} AS bucket, COALESCE(SUM(count), 0) AS credits "
+            "FROM api_usage "
+            "WHERE provider = ? AND day >= ? AND day <= ? "
+            "GROUP BY bucket ORDER BY bucket",
+            ("tavily", start_date, end_date),
+        ).fetchall()
+    ]
+
+    token_bucket = _bucket_expr(bucket, "created_at")
+    tokens = [
+        {
+            "bucket": row["bucket"],
+            "calls": row["calls"],
+            "tokens": row["tokens"],
+        }
+        for row in conn.execute(
+            f"SELECT {token_bucket} AS bucket, COUNT(*) AS calls, COALESCE(SUM(tokens), 0) AS tokens "
+            "FROM ai_calls "
+            "WHERE date(created_at) >= ? AND date(created_at) <= ? "
+            "GROUP BY bucket ORDER BY bucket",
+            (start_date, end_date),
+        ).fetchall()
+    ]
+
+    by_model = [
+        {
+            "model_id": row["model_id"],
+            "calls": row["calls"],
+            "tokens": row["tokens"],
+        }
+        for row in conn.execute(
+            "SELECT model_id, COUNT(*) AS calls, COALESCE(SUM(tokens), 0) AS tokens "
+            "FROM ai_calls "
+            "WHERE date(created_at) >= ? AND date(created_at) <= ? "
+            "GROUP BY model_id ORDER BY tokens DESC, model_id",
+            (start_date, end_date),
+        ).fetchall()
+    ]
+
+    credits_total = sum(int(item["credits"]) for item in credits)
+    tokens_total = sum(int(item["tokens"]) for item in tokens)
+    calls_total = sum(int(item["calls"]) for item in tokens)
+
+    return {
+        "bucket": bucket,
+        "range": {"start": start_date, "end": end_date},
+        "totals": {
+            "tavily_credits": credits_total,
+            "model_calls": calls_total,
+            "tokens": tokens_total,
+        },
+        "credits_by_bucket": credits,
+        "tokens_by_bucket": tokens,
+        "tokens_by_model": by_model,
     }
 
 

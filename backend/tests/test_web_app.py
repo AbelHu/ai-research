@@ -46,9 +46,11 @@ class _Capture:
 
 def _call(app, method: str, path: str) -> tuple[int, dict, bytes]:
     """Invoke the WSGI app; return (status_code, headers_dict, body_bytes)."""
+    path_info, _, query = path.partition("?")
     environ = {
         "REQUEST_METHOD": method,
-        "PATH_INFO": path,
+        "PATH_INFO": path_info,
+        "QUERY_STRING": query,
         "wsgi.input": io.BytesIO(b""),
         "wsgi.errors": io.StringIO(),
     }
@@ -96,9 +98,11 @@ def test_index_is_html(conn) -> None:
     assert "<title>Assistant dashboard</title>" in text
     assert "hello world" in text  # the request shows in the table
     assert "Tavily credits used today: 2" in text
-    assert "AI Model Token Usage" in text
-    assert "gpt-4o" in text
-    assert "123" in text
+    assert "Tavily credits total (all time): 2" in text
+    # Homepage links to dedicated detail pages.
+    assert "href='/usage'" in text
+    assert "href='/memories'" in text
+    assert "href='/requests'" in text
 
 
 def test_index_auto_refreshes(conn) -> None:
@@ -123,11 +127,45 @@ def test_index_shows_memories(conn) -> None:
     app = create_app(conn)
     _, _, body = _call(app, "GET", "/")
     text = body.decode("utf-8")
-    assert "<h2>Memories" in text
+    assert "href='/memories'" in text
+
+
+def test_memories_page_shows_memory_details(conn) -> None:
+    memories_repo.create_memory(
+        conn,
+        content="user prefers compact cards in dashboard",
+        summary="dark mode preference",
+        kind="preference",
+        confidence=0.9,
+        retention_class="short",
+        source_ref="https://example.com/preferences",
+    )
+    app = create_app(conn)
+    _, _, body = _call(app, "GET", "/memories")
+    text = body.decode("utf-8")
+    assert "<h1>Memories" in text
     assert "dark mode preference" in text
     assert "user prefers compact cards in dashboard" in text
     assert "https://example.com/preferences" in text
     assert "/api/memories" in text
+
+
+def test_usage_page_shows_model_token_table(conn) -> None:
+    req = requests_repo.create_request(conn, title="usage detail")
+    ai_calls_repo.record_ai_call(
+        conn,
+        request_id=req.id,
+        model_id="gpt-4o",
+        tokens=123,
+        latency_ms=900,
+        validation_status="valid",
+    )
+    app = create_app(conn)
+    _, _, body = _call(app, "GET", "/usage")
+    text = body.decode("utf-8")
+    assert "AI Model Token Usage" in text
+    assert "gpt-4o" in text
+    assert "123" in text
 
 
 def test_index_escapes_html(conn) -> None:
@@ -172,6 +210,43 @@ def test_api_system(conn) -> None:
     assert "metrics" in data and "usage" in data
     assert "cpu" in data["metrics"] and "disk" in data["metrics"]
     assert "web_search_credits_used_today" in data["usage"]
+    assert "web_search_credits_total" in data["usage"]
+
+
+def test_api_usage_with_bucket_and_range(conn) -> None:
+    req = requests_repo.create_request(conn, title="usage api")
+    first = ai_calls_repo.record_ai_call(
+        conn,
+        request_id=req.id,
+        model_id="gpt-4o",
+        tokens=40,
+    )
+    second = ai_calls_repo.record_ai_call(
+        conn,
+        request_id=req.id,
+        model_id="gpt-4o-mini",
+        tokens=20,
+    )
+    with conn:
+        conn.execute("UPDATE ai_calls SET created_at = ? WHERE id = ?", ("2026-06-01", first))
+        conn.execute("UPDATE ai_calls SET created_at = ? WHERE id = ?", ("2026-06-02", second))
+    api_usage_repo.increment(conn, "tavily", day="2026-06-01", amount=2)
+    api_usage_repo.increment(conn, "tavily", day="2026-06-02", amount=1)
+
+    app = create_app(conn)
+    code, data = _json(app, "GET", "/api/usage?bucket=day&start=2026-06-01&end=2026-06-02")
+    assert code == 200
+    assert data["bucket"] == "day"
+    assert data["range"] == {"start": "2026-06-01", "end": "2026-06-02"}
+    assert data["totals"]["tokens"] == 60
+    assert data["totals"]["tavily_credits"] == 3
+
+
+def test_api_usage_rejects_invalid_bucket(conn) -> None:
+    app = create_app(conn)
+    code, data = _json(app, "GET", "/api/usage?bucket=hour")
+    assert code == 400
+    assert "invalid bucket" in data["error"]
 
 
 def test_api_memories(conn) -> None:
