@@ -14,11 +14,12 @@ import pytest
 
 from app.storage.db import connect
 from app.storage.migrations import migrate
-from app.storage.repos import identities as identities_repo
-from app.storage.repos import memories as memories_repo
-from app.storage.repos import requests as requests_repo
 from app.storage.repos import ai_calls as ai_calls_repo
 from app.storage.repos import api_usage as api_usage_repo
+from app.storage.repos import identities as identities_repo
+from app.storage.repos import job_queue as job_queue_repo
+from app.storage.repos import memories as memories_repo
+from app.storage.repos import requests as requests_repo
 from app.web.app import create_app
 
 
@@ -81,6 +82,8 @@ def test_healthz(conn) -> None:
 def test_index_is_html(conn) -> None:
     requests_repo.create_request(conn, title="hello world")
     req = requests_repo.create_request(conn, title="usage seed")
+    job = requests_repo.create_job(conn, request_id=req.id, kind="task", complexity="complex")
+    job_queue_repo.enqueue(conn, job.id)
     ai_calls_repo.record_ai_call(
         conn,
         request_id=req.id,
@@ -99,10 +102,26 @@ def test_index_is_html(conn) -> None:
     assert "hello world" in text  # the request shows in the table
     assert "Tavily credits used today: 2" in text
     assert "Tavily credits total (all time): 2" in text
+    assert "Jobs in queue: 1" in text
     # Homepage links to dedicated detail pages.
     assert "href='/usage'" in text
     assert "href='/memories'" in text
     assert "href='/requests'" in text
+
+
+def test_requests_page_shows_job_queue_attempts_and_error(conn) -> None:
+    req = requests_repo.create_request(conn, title="queue demo")
+    job = requests_repo.create_job(conn, request_id=req.id, kind="task", complexity="complex")
+    job_queue_repo.enqueue(conn, job.id)
+    job_queue_repo.claim_next(conn)
+    job_queue_repo.requeue_pending(conn, job.id, "request timed out")
+    app = create_app(conn)
+    _, _, body = _call(app, "GET", "/requests")
+    text = body.decode("utf-8")
+    assert "Job Queue" in text
+    assert "Attempts" in text
+    assert "request timed out" in text
+    assert "queue demo" in text
 
 
 def test_index_auto_refreshes(conn) -> None:
@@ -204,13 +223,18 @@ def test_api_request_detail_and_404(conn) -> None:
 
 def test_api_system(conn) -> None:
     api_usage_repo.increment(conn, "tavily", amount=1)
+    req = requests_repo.create_request(conn, title="sys queue")
+    job = requests_repo.create_job(conn, request_id=req.id, kind="task", complexity="complex")
+    job_queue_repo.enqueue(conn, job.id)
     app = create_app(conn)
     code, data = _json(app, "GET", "/api/system")
     assert code == 200
     assert "metrics" in data and "usage" in data
+    assert "queue" in data
     assert "cpu" in data["metrics"] and "disk" in data["metrics"]
     assert "web_search_credits_used_today" in data["usage"]
     assert "web_search_credits_total" in data["usage"]
+    assert data["queue"]["total_jobs"] == 1
 
 
 def test_api_usage_with_bucket_and_range(conn) -> None:

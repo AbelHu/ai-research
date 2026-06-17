@@ -57,7 +57,11 @@ def _request_detail(conn: sqlite3.Connection, request_id: str) -> tuple[int, obj
 
 
 def _system(conn: sqlite3.Connection) -> tuple[int, object]:
-    return 200, {"metrics": services.system_metrics(), "usage": services.model_usage(conn)}
+    return 200, {
+        "metrics": services.system_metrics(),
+        "usage": services.model_usage(conn),
+        "queue": services.job_queue_overview(conn),
+    }
 
 
 def _usage(
@@ -169,6 +173,7 @@ def _render_home(conn: sqlite3.Connection) -> str:
     """
     usage = services.model_usage(conn)
     metrics = services.system_metrics()
+    queue = services.job_queue_overview(conn, limit=8)
     requests = services.request_overview(conn, limit=5)
     disk = metrics["disk"]
     cpu = metrics["cpu"]
@@ -189,6 +194,10 @@ def _render_home(conn: sqlite3.Connection) -> str:
 <li>Model calls: {usage["total_calls"]} ({usage["total_tokens"]} tokens)</li>
 <li>Tavily credits used today: {_escape(usage['web_search_credits_used_today'])}</li>
 <li>Tavily credits total (all time): {_escape(usage['web_search_credits_total'])}</li>
+<li>Jobs in queue: {_escape(queue['total_jobs'])}
+    (pending {_escape(queue['by_status']['pending'])},
+    running {_escape(queue['by_status']['running'])},
+    failed {_escape(queue['by_status']['failed'])})</li>
 {cpu_line}
 <li>Disk: {_escape(disk["percent"])}% used</li>
 </ul>
@@ -208,17 +217,37 @@ def _render_home(conn: sqlite3.Connection) -> str:
 
 def _render_requests_page(conn: sqlite3.Connection) -> str:
     requests = services.request_overview(conn, limit=100)
+    queue = services.job_queue_overview(conn, limit=30)
     rows = "\n".join(
         f"<tr><td>{_escape(r['code'])}</td><td>{_escape(r['title'])}</td>"
         f"<td>{_escape(r['status'])}</td><td>{_escape(r['state'])}</td>"
         f"<td><a href='/api/requests/{r['id']}'>details</a></td></tr>"
         for r in requests
     )
+    queue_rows = "\n".join(
+        f"<tr><td>{_escape(j['job_id'])}</td><td>{_escape(j['request_code'])}</td>"
+        f"<td>{_escape(j['status'])}</td><td>{_escape(j['attempts'])}</td>"
+        f"<td>{_escape(j['error'])}</td><td>{_escape(j['updated_at'])}</td></tr>"
+        for j in queue["jobs"]
+    )
+    if not queue_rows:
+        queue_rows = "<tr><td colspan='6' class='muted'>No queued jobs yet.</td></tr>"
     body = f"""
 <h1>Requests ({len(requests)})</h1>
 {_nav()}
 <table><tr><th>Code</th><th>Title</th><th>Status</th><th>State</th><th></th></tr>
 {rows}
+</table>
+<h2>Job Queue</h2>
+<p class='muted'>Pending: {_escape(queue['by_status']['pending'])}
+ · Running: {_escape(queue['by_status']['running'])}
+ · Done: {_escape(queue['by_status']['done'])}
+ · Failed: {_escape(queue['by_status']['failed'])}</p>
+<table>
+<tr>
+<th>Job</th><th>Request</th><th>Status</th><th>Attempts</th><th>Last error</th><th>Updated</th>
+</tr>
+{queue_rows}
 </table>
 """
     return _page_shell(title="Requests", body=body)
@@ -242,7 +271,11 @@ def _render_memories_page(conn: sqlite3.Connection) -> str:
 <h1>Memories ({len(memories)})</h1>
 {_nav()}
 <p class='muted'>JSON source: <a href='/api/memories'>/api/memories</a>.</p>
-<table><tr><th>Kind</th><th>Summary</th><th>Preview</th><th>Importance</th><th>Confidence</th><th>Uses</th><th>Retention</th><th>Source</th><th>Last used</th><th>Expires</th></tr>
+<table>
+<tr>
+<th>Kind</th><th>Summary</th><th>Preview</th><th>Importance</th><th>Confidence</th>
+<th>Uses</th><th>Retention</th><th>Source</th><th>Last used</th><th>Expires</th>
+</tr>
 {rows}
 </table>
 """

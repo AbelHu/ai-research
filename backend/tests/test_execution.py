@@ -114,8 +114,22 @@ def test_plan_declined_stops_and_reports(conn) -> None:
 
 def test_phase_decline_escalates(conn) -> None:
     req, job, card = _planned_job(conn)
-    # plan approved, task runs, but the phase sign-off declines → escalate.
-    advisor = _advisor(conn, [_plan_json("Only"), APPROVE, SEARCH, DECLINE])
+    # plan approved; repeated declines eventually hit the cap and escalate.
+    advisor = _advisor(
+        conn,
+        [
+            _plan_json("Only"),
+            APPROVE,
+            SEARCH,
+            DECLINE,
+            SEARCH,
+            DECLINE,
+            SEARCH,
+            DECLINE,
+            SEARCH,
+            DECLINE,
+        ],
+    )
 
     outcome = execute_planned_job(conn, advisor, job_id=job.id, card=card)
 
@@ -123,6 +137,17 @@ def test_phase_decline_escalates(conn) -> None:
     assert outcome.delivery is not None and "needs another look" in outcome.delivery
     # The request awaits the user's reply so a follow-up threads back to it.
     assert requests_repo.get_request(conn, req.id).status == requests_repo.AWAITING_STATUS
+
+
+def test_phase_decline_then_rework_can_complete(conn) -> None:
+    req, job, card = _planned_job(conn)
+    # First review declines (recoverable), second pass approves.
+    advisor = _advisor(conn, [_plan_json("Only"), APPROVE, SEARCH, DECLINE, SEARCH, APPROVE])
+
+    outcome = execute_planned_job(conn, advisor, job_id=job.id, card=card)
+
+    assert outcome.status == "completed"
+    assert outcome.delivery is not None and f"/req {req.code}" in outcome.delivery
 
 
 def test_card_for_job_reconstructs_from_db(conn) -> None:

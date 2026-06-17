@@ -26,6 +26,7 @@ from datetime import date, timedelta
 from app.storage.repos import ai_calls as ai_calls_repo
 from app.storage.repos import api_usage as api_usage_repo
 from app.storage.repos import identities as identities_repo
+from app.storage.repos import job_queue as job_queue_repo
 from app.storage.repos import memories as memories_repo
 from app.storage.repos import plans as plans_repo
 from app.storage.repos import requests as requests_repo
@@ -148,6 +149,55 @@ def request_tree(conn: sqlite3.Connection, request_id: int) -> dict | None:
     }
 
 
+def job_queue_overview(conn: sqlite3.Connection, *, limit: int = 20) -> dict:
+    """Queue status/attempts snapshot for dashboard observability.
+
+    Includes status totals and latest queue rows (with retry-relevant fields)
+    so operators can inspect transient retries and terminal failures.
+    """
+    counts = {
+        row["status"]: row["n"]
+        for row in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM job_queue GROUP BY status"
+        ).fetchall()
+    }
+    by_status = {
+        job_queue_repo.PENDING: int(counts.get(job_queue_repo.PENDING, 0)),
+        job_queue_repo.RUNNING: int(counts.get(job_queue_repo.RUNNING, 0)),
+        job_queue_repo.DONE: int(counts.get(job_queue_repo.DONE, 0)),
+        job_queue_repo.FAILED: int(counts.get(job_queue_repo.FAILED, 0)),
+    }
+
+    rows = conn.execute(
+        "SELECT q.job_id, q.status, q.attempts, q.error, q.updated_at, q.created_at, "
+        "       j.kind, r.code AS request_code, r.title AS request_title "
+        "FROM job_queue q "
+        "LEFT JOIN jobs j ON j.id = q.job_id "
+        "LEFT JOIN requests r ON r.id = j.request_id "
+        "ORDER BY q.job_id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    jobs = [
+        {
+            "job_id": row["job_id"],
+            "status": row["status"],
+            "attempts": row["attempts"],
+            "error": row["error"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "kind": row["kind"],
+            "request_code": row["request_code"],
+            "request_title": row["request_title"],
+        }
+        for row in rows
+    ]
+    return {
+        "total_jobs": sum(by_status.values()),
+        "by_status": by_status,
+        "jobs": jobs,
+    }
+
+
 # --- System page: model usage (T10.3) ---------------------------------------
 
 
@@ -263,7 +313,8 @@ def usage_aggregate(
             "tokens": row["tokens"],
         }
         for row in conn.execute(
-            f"SELECT {token_bucket} AS bucket, COUNT(*) AS calls, COALESCE(SUM(tokens), 0) AS tokens "
+            f"SELECT {token_bucket} AS bucket, "
+            "COUNT(*) AS calls, COALESCE(SUM(tokens), 0) AS tokens "
             "FROM ai_calls "
             "WHERE date(created_at) >= ? AND date(created_at) <= ? "
             "GROUP BY bucket ORDER BY bucket",

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import time
 from collections.abc import Callable
@@ -30,6 +31,7 @@ from dotenv import load_dotenv
 from app.advisor.providers import MissingCredentialError
 from app.advisor.wrapper import Advisor
 from app.channels.adapter import OutboundMessage
+from app.config.policies import get_policies
 from app.config.settings import REPO_ROOT, get_settings, load_models_config
 from app.roles.execution import execute_planned_job
 from app.runlog import setup_run_logging
@@ -45,6 +47,18 @@ DEFAULT_IDLE_SECONDS = 2.0
 
 # A delivery sink: send an outbound reply over a channel (e.g. ``adapter.send``).
 SendFn = Callable[[OutboundMessage], None]
+
+_RETRYABLE_ERROR_PATTERNS = (
+    re.compile(r"timeout|timed out", re.IGNORECASE),
+    re.compile(r"connection|network|temporar", re.IGNORECASE),
+    re.compile(r"429|rate\s*limit|too many requests", re.IGNORECASE),
+    re.compile(r"5\d\d|server error|bad gateway|service unavailable", re.IGNORECASE),
+)
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    text = str(exc)
+    return any(p.search(text) for p in _RETRYABLE_ERROR_PATTERNS)
 
 
 def _deliver(send: SendFn | None, job: job_queue_repo.QueuedJob, text: str) -> None:
@@ -79,6 +93,17 @@ def _process_one(
         logger.info("job %s finished: %s", job.job_id, outcome.status)
         _deliver(send, job, outcome.delivery or "")
     except Exception as exc:  # noqa: BLE001 - one bad job must not kill the worker
+        max_retries = get_policies().max_job_retries
+        if _is_retryable_error(exc) and job.attempts <= max_retries:
+            logger.warning(
+                "job %s transient failure (attempt %s/%s), requeuing: %s",
+                job.job_id,
+                job.attempts,
+                max_retries,
+                exc,
+            )
+            job_queue_repo.requeue_pending(conn, job.job_id, str(exc))
+            return
         logger.error("job %s failed: %s", job.job_id, exc)
         job_queue_repo.mark_failed(conn, job.job_id, str(exc))
 

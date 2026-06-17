@@ -80,15 +80,17 @@ def _run_one_phase(
     request_id: int,
     job_id: int,
     user_id: int | None,
-) -> str:
-    """Drive one phase Approved → Closed; return the sign-off decision.
+) -> company_expert.PhaseReview:
+    """Drive one phase Approved → Closed; return the sign-off review.
 
     Boss activates the phase, the Senior Worker runs its tasks, the Plan Expert
     resolves it, and the Company Expert signs it off — each step a §6B-legal
     transition. Returns ``"approve"`` (phase Closed) or ``"decline"``.
     """
     # Boss: phase Approved → Active.
-    plans_repo.set_phase_status(conn, phase.id, "Active", actor=Role.boss)
+    current = plans_repo.get_phase(conn, phase.id)
+    if current is not None and current.status == "Approved":
+        plans_repo.set_phase_status(conn, phase.id, "Active", actor=Role.boss)
 
     # Senior Worker: run the phase's tasks (Active → InProgress, tasks → Resolved).
     senior.run_phase(conn, advisor, phase, request_id=request_id, job_id=job_id, user_id=user_id)
@@ -104,7 +106,7 @@ def _run_one_phase(
         request_id=request_id,
         job_id=job_id,
     )
-    return review.decision
+    return review
 
 
 def execute_planned_job(
@@ -168,26 +170,30 @@ def execute_planned_job(
     # 3) Boss starts the runner: plan Approved → InProgress.
     plans_repo.set_plan_status(conn, plan.id, "InProgress", actor=Role.boss)
 
-    # 4) Run each phase in order; stop + escalate if one isn't signed off.
+    # 4) Run each phase in order. A recoverable decline loops for rework until
+    # approved; only a capped decline escalates.
     for phase in plans_repo.list_phases(conn, plan.id):
-        decision = _run_one_phase(
-            conn, advisor, phase, request_id=request_id, job_id=job_id, user_id=user_id
-        )
-        if decision != "approve":
-            delivery = pm.format_delivery(
-                request,
-                "I worked through this but a phase needs another look before I "
-                "can finish. I'll follow up rather than deliver something unsound.",
+        while True:
+            review = _run_one_phase(
+                conn, advisor, phase, request_id=request_id, job_id=job_id, user_id=user_id
             )
-            # Wait on the user: their next reply threads back here (§6C continuity).
-            requests_repo.set_request_status(conn, request_id, requests_repo.AWAITING_STATUS)
-            return JobOutcome(
-                status="phase_escalated",
-                job_id=job_id,
-                request=request,
-                plan_id=plan.id,
-                delivery=delivery,
-            )
+            if review.decision == "approve":
+                break
+            if review.escalate:
+                delivery = pm.format_delivery(
+                    request,
+                    "I worked through this but a phase needs another look before I "
+                    "can finish. I'll follow up rather than deliver something unsound.",
+                )
+                # Wait on the user: their next reply threads back here (§6C continuity).
+                requests_repo.set_request_status(conn, request_id, requests_repo.AWAITING_STATUS)
+                return JobOutcome(
+                    status="phase_escalated",
+                    job_id=job_id,
+                    request=request,
+                    plan_id=plan.id,
+                    delivery=delivery,
+                )
 
     # 5) Company Expert: plan InProgress → Resolved (all phases signed off).
     plans_repo.set_plan_status(conn, plan.id, "Resolved", actor=Role.company_expert)

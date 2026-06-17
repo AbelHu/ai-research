@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+import app.cli.jobworker as jobworker
 from app.advisor.wrapper import Advisor
 from app.channels.adapter import OutboundMessage
 from app.cli.jobworker import serve_jobs
@@ -170,3 +171,53 @@ def test_worker_once_returns_when_drained(conn) -> None:
     rc = serve_jobs(conn, advisor, None, once=True, on_idle_sleep=slept.append)
     assert rc == 0
     assert slept == []
+
+def test_worker_retries_transient_failure_then_succeeds(conn, monkeypatch) -> None:
+    ensure_owner(conn)
+    _req, job = _planned_job(conn)
+    jq.enqueue(conn, job.id, channel="telegram", chat_id="22")
+    sink = _Sink()
+
+    calls = {"n": 0}
+
+    class _Outcome:
+        status = "completed"
+        delivery = "done"
+
+    def _flaky_execute(_conn, _advisor, *, job_id, user_id=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("request timed out")
+        return _Outcome()
+
+    monkeypatch.setattr(jobworker, "execute_planned_job", _flaky_execute)
+    # Allow one retry after first transient failure.
+    monkeypatch.setattr(jobworker, "get_policies", lambda: type("P", (), {"max_job_retries": 1})())
+
+    advisor = _advisor(conn, ["{}"])
+    serve_jobs(conn, advisor, sink, once=True)
+
+    row = jq.get(conn, job.id)
+    assert row.status == jq.DONE
+    assert row.attempts == 2  # first claim failed transiently, second succeeded
+    assert len(sink.sent) == 1 and sink.sent[0].chat_id == "22"
+
+
+def test_worker_marks_failed_after_retry_budget_exhausted(conn, monkeypatch) -> None:
+    ensure_owner(conn)
+    _req, job = _planned_job(conn)
+    jq.enqueue(conn, job.id)
+
+    def _always_timeout(_conn, _advisor, *, job_id, user_id=None):
+        raise TimeoutError("request timed out")
+
+    monkeypatch.setattr(jobworker, "execute_planned_job", _always_timeout)
+    # Zero retries: first transient failure becomes terminal.
+    monkeypatch.setattr(jobworker, "get_policies", lambda: type("P", (), {"max_job_retries": 0})())
+
+    advisor = _advisor(conn, ["{}"])
+    serve_jobs(conn, advisor, None, once=True)
+
+    row = jq.get(conn, job.id)
+    assert row.status == jq.FAILED
+    assert row.attempts == 1

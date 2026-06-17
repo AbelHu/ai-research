@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import app.skills  # noqa: F401  -- ensure @skill registration
 from app.advisor.wrapper import Advisor
+from app.config.policies import get_policies
 from app.roles.envelope import Role
 from app.skills import runtime
 from app.skills.context import SkillContext
@@ -80,16 +81,12 @@ def run_task(
     job_id: int,
     user_id: int | None = None,
     permissions: frozenset[str] = DEFAULT_PERMISSIONS,
+    max_task_steps: int | None = None,
 ) -> TaskRun:
     """Execute one task: propose → run a skill → record → ``Resolved`` (§8.4)."""
+    max_steps = max_task_steps if max_task_steps is not None else get_policies().max_task_steps
     plans_repo.set_task_status(conn, task.id, "InProgress", actor=_ACTOR)
 
-    action = advisor.next_action(
-        goal=task.title or "",
-        catalog=json.dumps(catalog(), ensure_ascii=False),
-        request_id=request_id,
-        job_id=job_id,
-    )
     ctx = SkillContext(
         user_id=user_id if user_id is not None else 0,
         conn=conn,
@@ -97,10 +94,37 @@ def run_task(
         job_id=job_id,
         task_id=task.id,
     )
-    result = runtime.execute(action.skill, action.params, ctx)
+
+    # Bounded execution loop: propose/execute until done, stable-repeat, or
+    # max_task_steps reached.
+    progress = ""
+    seen_actions: set[str] = set()
+    last_skill = "none"
+    last_step_id: int | None = None
+    for _ in range(max_steps):
+        action = advisor.next_action(
+            goal=task.title or "",
+            catalog=json.dumps(catalog(), ensure_ascii=False),
+            progress=progress,
+            request_id=request_id,
+            job_id=job_id,
+        )
+        if action.done:
+            break
+
+        fingerprint = f"{action.skill}:{json.dumps(action.params, sort_keys=True)}"
+        if fingerprint in seen_actions:
+            # Prevent infinite loops when the model repeats the same call.
+            break
+
+        result = runtime.execute(action.skill, action.params, ctx)
+        last_skill = action.skill
+        last_step_id = result.step_id
+        seen_actions.add(fingerprint)
+        progress += f"Ran {action.skill}; status={result.status}. "
 
     plans_repo.set_task_status(conn, task.id, "Resolved", actor=_ACTOR)
-    return TaskRun(task_id=task.id, skill=action.skill, step_id=result.step_id, status="Resolved")
+    return TaskRun(task_id=task.id, skill=last_skill, step_id=last_step_id, status="Resolved")
 
 
 def run_phase(

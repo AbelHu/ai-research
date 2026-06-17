@@ -170,6 +170,10 @@ queue and exits).
 > that needs planning is acknowledged right away (`/req … I'll work through it`)
 > and the **final answer arrives as a follow-up** once the job worker finishes —
 > quoting your original message so it's clear which request it answers.
+>
+> The background worker automatically retries **transient** job failures (timeout,
+> network, rate-limit, temporary upstream errors) up to `max_job_retries`
+> (`config/policies.yaml`) before marking a job failed.
 
 Open `http://127.0.0.1:8000` in a local browser for the HTML view, or use the
 JSON API directly (handy for scripting/testing). The HTML dashboard
@@ -181,7 +185,7 @@ HTML pages (linked from the homepage nav):
 | Page | Purpose |
 |------|---------|
 | `GET /` | homepage with quick system snapshot + links |
-| `GET /requests` | request list with links to `GET /api/requests/<id>` |
+| `GET /requests` | request list with links to `GET /api/requests/<id>` + queue status/attempts/last error |
 | `GET /memories` | detailed memory table |
 | `GET /usage` | token/credit usage tables |
 | `GET /accounts` | paired/revoked account table |
@@ -191,7 +195,7 @@ HTML pages (linked from the homepage nav):
 | `GET /healthz` | `{"status":"ok"}` liveness probe |
 | `GET /api/requests` | request index (newest first) |
 | `GET /api/requests/<id>` | one request's job→plan→phase→task tree + steps + `ai_calls` |
-| `GET /api/system` | host metrics (CPU/mem/disk) + model usage from `ai_calls` (including per-model tokens and Tavily credits used today + all-time total) |
+| `GET /api/system` | host metrics (CPU/mem/disk) + model usage from `ai_calls` + queue overview (`pending/running/done/failed`, attempts, latest errors) |
 | `GET /api/usage?bucket=day|week|month&days=N` | aggregated Tavily credits + AI calls/tokens over the last N days/weeks/months |
 | `GET /api/usage?bucket=day|week|month&start=YYYY-MM-DD&end=YYYY-MM-DD` | aggregated Tavily credits + AI calls/tokens over a specific duration |
 | `GET /api/memories` | the active memories (newest first) — kind, summary, preview, importance, confidence, use count, retention, source, last used, expires |

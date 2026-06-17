@@ -9,7 +9,7 @@ import pytest
 from app.advisor.schemas import PhaseSpec, PlanSpec, TaskSpec
 from app.advisor.wrapper import Advisor
 from app.roles.envelope import Role
-from app.roles.senior import _topological_order, run_phase
+from app.roles.senior import _topological_order, run_phase, run_task
 from app.skills.context import SkillContext
 from app.storage.db import connect
 from app.storage.migrations import migrate
@@ -22,6 +22,12 @@ from app.storage.repos.plans import PlanTask
 # The worker proposes a read-only memory.search for every task.
 SEARCH_ACTION = json.dumps(
     {"skill": "memory.search", "params": {"query": "vendor"}, "rationale": "look it up"}
+)
+SEARCH_ACTION_2 = json.dumps(
+    {"skill": "memory.search", "params": {"query": "price"}, "rationale": "refine"}
+)
+DONE_ACTION = json.dumps(
+    {"skill": "memory.search", "params": {}, "rationale": "done", "done": True}
 )
 
 
@@ -113,3 +119,28 @@ def test_skill_context_has_task_id(db) -> None:
         user_id=0, conn=db, permissions=frozenset({"memory.read"}), job_id=1, task_id=9
     )
     assert ctx.task_id == 9
+
+
+def test_task_can_run_multiple_steps_until_done(db) -> None:
+    spec = PlanSpec(phases=[PhaseSpec(title="P", tasks=[TaskSpec(title="do it")])])
+    req, job, plan = _approved_plan(db, spec)
+    phase = plans_repo.list_phases(db, plan.id)[0]
+    plans_repo.set_phase_status(db, phase.id, "Active", actor=Role.boss)
+
+    from tests.fakes import FakeProvider
+
+    provider = FakeProvider([SEARCH_ACTION, SEARCH_ACTION_2, DONE_ACTION])
+    advisor = Advisor(resolve_provider=lambda _role: provider, conn=db)
+    task = plans_repo.list_tasks(db, phase.id)[0]
+    run_task(
+        db,
+        advisor,
+        task,
+        request_id=req.id,
+        job_id=job.id,
+        user_id=None,
+        max_task_steps=3,
+    )
+
+    steps = steps_repo.list_steps(db, job.id)
+    assert len(steps) == 2  # two executed actions, then done signal

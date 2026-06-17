@@ -15,6 +15,7 @@ from app.storage.migrations import migrate
 from app.storage.repos import ai_calls as ai_calls_repo
 from app.storage.repos import api_usage as api_usage_repo
 from app.storage.repos import identities as identities_repo
+from app.storage.repos import job_queue as job_queue_repo
 from app.storage.repos import memories as memories_repo
 from app.storage.repos import plans as plans_repo
 from app.storage.repos import requests as requests_repo
@@ -96,6 +97,38 @@ def test_request_tree_without_job_has_empty_branches(conn) -> None:
     assert tree["plan"] is None
     assert tree["phases"] == []
     assert tree["steps"] == []
+
+
+def test_job_queue_overview_includes_attempts_and_errors(conn) -> None:
+    req1, job1 = _seed_request_with_job(conn)
+    req2, job2 = _seed_request_with_job(conn)
+    req3, job3 = _seed_request_with_job(conn)
+
+    job_queue_repo.enqueue(conn, job1.id)
+    job_queue_repo.enqueue(conn, job2.id)
+    job_queue_repo.enqueue(conn, job3.id)
+    job_queue_repo.claim_next(conn)
+    job_queue_repo.requeue_pending(conn, job1.id, "request timed out")
+    job_queue_repo.claim_next(conn)
+    job_queue_repo.mark_done(conn, job1.id, "ok")
+    job_queue_repo.claim_next(conn)
+    job_queue_repo.mark_failed(conn, job2.id, "bad request")
+
+    overview = services.job_queue_overview(conn)
+    assert overview["total_jobs"] == 3
+    assert overview["by_status"] == {
+        "pending": 1,
+        "running": 0,
+        "done": 1,
+        "failed": 1,
+    }
+
+    jobs = {row["job_id"]: row for row in overview["jobs"]}
+    assert jobs[job1.id]["attempts"] == 2
+    assert jobs[job1.id]["status"] == "done"
+    assert jobs[job2.id]["status"] == "failed"
+    assert jobs[job2.id]["error"] == "bad request"
+    assert jobs[job3.id]["request_title"] == req3.title
 
 
 # --- System page: model usage (T10.3) ---------------------------------------

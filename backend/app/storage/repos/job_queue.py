@@ -133,6 +133,16 @@ def mark_failed(conn: sqlite3.Connection, job_id: int, error: str) -> None:
         )
 
 
+def requeue_pending(conn: sqlite3.Connection, job_id: int, error: str) -> None:
+    """Return a running job to ``pending`` after a retryable transient failure."""
+    with conn:
+        conn.execute(
+            "UPDATE job_queue SET status = ?, error = ?, updated_at = datetime('now') "
+            "WHERE job_id = ?",
+            (PENDING, error, job_id),
+        )
+
+
 def list_by_status(conn: sqlite3.Connection, status: str) -> list[QueuedJob]:
     """Return queued jobs in a given status, oldest first (for status/tests)."""
     rows = conn.execute(
