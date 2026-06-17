@@ -8,6 +8,7 @@
     "complexity": { "type": "string", "enum": ["simple", "complex"] },
     "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
     "rationale": { "type": "string" },
+    "domain": { "type": "string", "enum": ["coding", "research", "general"] },
     "plan": {
       "type": ["object", "null"],
       "properties": {

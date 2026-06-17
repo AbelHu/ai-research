@@ -107,3 +107,24 @@ def test_append_that_belongs_proceeds(db) -> None:
     card = _card(db, text="also add pricing", append=True)
     result = analyze(db, _advisor(db, _analysis(belongs=True)), card)
     assert result.verdict == "answer_ask"
+
+
+def test_domain_is_carried_onto_card_and_payload(db) -> None:
+    # The Analyzer advises the work domain; deterministic code carries it to the
+    # downstream worker (on the card) so the tool catalog can be gated (§8.6).
+    card = _card(db, text="refactor this function")
+    result = analyze(db, _advisor(db, _analysis(domain="coding")), card)
+
+    assert result.analysis.domain == "coding"
+    assert result.envelope.payload["domain"] == "coding"
+    assert card["domain"] == "coding"
+
+
+def test_domain_defaults_to_general_when_model_omits_it(db) -> None:
+    # Older/omitted replies still validate; the safe default is "general".
+    card = _card(db, text="what is 2+2?")
+    result = analyze(db, _advisor(db, _analysis()), card)
+
+    assert result.analysis.domain == "general"
+    assert result.envelope.payload["domain"] == "general"
+

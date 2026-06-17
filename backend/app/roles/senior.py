@@ -19,7 +19,7 @@ import app.skills  # noqa: F401  -- ensure @skill registration
 from app.advisor.wrapper import Advisor
 from app.config.policies import get_policies
 from app.roles.envelope import Role
-from app.skills import runtime
+from app.skills import runtime, toolpolicy
 from app.skills.context import SkillContext
 from app.skills.registry import catalog
 from app.storage.repos import plans as plans_repo
@@ -82,8 +82,13 @@ def run_task(
     user_id: int | None = None,
     permissions: frozenset[str] = DEFAULT_PERMISSIONS,
     max_task_steps: int | None = None,
+    domain: str = "general",
 ) -> TaskRun:
-    """Execute one task: propose → run a skill → record → ``Resolved`` (§8.4)."""
+    """Execute one task: propose → run a skill → record → ``Resolved`` (§8.4).
+
+    The skill catalog the worker may propose from is gated by the request's
+    ``domain`` (§8.6): a coding task is offered no external web-research tools.
+    """
     max_steps = max_task_steps if max_task_steps is not None else get_policies().max_task_steps
     plans_repo.set_task_status(conn, task.id, "InProgress", actor=_ACTOR)
 
@@ -95,6 +100,10 @@ def run_task(
         task_id=task.id,
     )
 
+    # Domain-gated catalog: deterministic code decides which tools the AI may
+    # propose for this request's domain (the AI only advised the domain).
+    catalog_json = json.dumps(catalog(toolpolicy.allowed_skills(domain=domain)), ensure_ascii=False)
+
     # Bounded execution loop: propose/execute until done, stable-repeat, or
     # max_task_steps reached.
     progress = ""
@@ -104,7 +113,7 @@ def run_task(
     for _ in range(max_steps):
         action = advisor.next_action(
             goal=task.title or "",
-            catalog=json.dumps(catalog(), ensure_ascii=False),
+            catalog=catalog_json,
             progress=progress,
             request_id=request_id,
             job_id=job_id,
@@ -136,11 +145,13 @@ def run_phase(
     job_id: int,
     user_id: int | None = None,
     permissions: frozenset[str] = DEFAULT_PERMISSIONS,
+    domain: str = "general",
 ) -> list[TaskRun]:
     """Run all of a phase's tasks in dependency order; return the runs in order.
 
     Moves the phase ``Active -> InProgress`` on the first task. Phase resolution
-    (all tasks done → ``Resolved``) is the Plan Expert's job (T6.6).
+    (all tasks done → ``Resolved``) is the Plan Expert's job (T6.6). ``domain``
+    is forwarded so each task's tool catalog is gated consistently (§8.6).
     """
     current_phase = plans_repo.get_phase(conn, phase.id)
     if current_phase is not None and current_phase.status == "Active":
@@ -161,6 +172,7 @@ def run_phase(
                 job_id=job_id,
                 user_id=user_id,
                 permissions=permissions,
+                domain=domain,
             )
         )
     return runs

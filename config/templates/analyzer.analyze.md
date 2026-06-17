@@ -14,6 +14,10 @@ Respond with a **single JSON object** only:
 - `complexity`: `"simple"` or `"complex"`.
 - `confidence`: a number from 0 to 1.
 - `rationale`: one short sentence.
+- `domain`: the work domain — `"coding"` for writing/refactoring/debugging code
+  against the user's project, `"research"` for questions needing external/world
+  information, or `"general"` otherwise. Code uses this to decide which tools
+  may run (e.g. coding work does not web-search), so classify it carefully.
 - `plan`: optional — for a complex job, an object with a `phases` array of short
   phase-title **strings** (e.g. `["research", "compare", "recommend"]`). Keep it
   high-level; detailed planning happens in a later step, so do **not** nest

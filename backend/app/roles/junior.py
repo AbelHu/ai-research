@@ -22,7 +22,7 @@ import app.skills  # noqa: F401  -- ensure @skill registration (memory/web/data)
 from app.advisor.schemas import AnswerDraft
 from app.advisor.wrapper import Advisor, AdvisorValidationError
 from app.roles.envelope import Action, Role, RoleMessage
-from app.skills import runtime
+from app.skills import runtime, toolpolicy
 from app.skills.context import SkillContext
 from app.skills.policy import PermissionDenied
 from app.skills.registry import catalog
@@ -165,6 +165,7 @@ def _research(
     request_id: int,
     job_id: int,
     memory_user_id: int | None,
+    domain: str = "general",
 ) -> list[dict]:
     """Bounded read-tool loop: gather web/live context when memory had nothing (§6A).
 
@@ -172,8 +173,12 @@ def _research(
     restricted catalog); deterministic code runs it and renders the result as
     citeable findings. If the model can't propose a valid tool (or says it's
     done), we fall through and let it answer from its own knowledge.
+
+    The candidate tools are gated by the request's ``domain`` (§8.6): a coding
+    ask never web-searches, conserving metered credits for work that needs the
+    web.
     """
-    allowed = _research_tool_names()
+    allowed = toolpolicy.allowed_skills(domain=domain, base=_research_tool_names())
     if not allowed:
         return []
     findings: list[dict] = []
@@ -242,6 +247,7 @@ def answer_ask(
             request_id=card["request_id"],
             job_id=job_id,
             memory_user_id=user_id,
+            domain=card.get("domain", "general"),
         )
 
     try:

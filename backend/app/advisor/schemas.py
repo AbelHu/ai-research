@@ -24,6 +24,10 @@ from pydantic import BaseModel, ConfigDict, Field
 Kind = Literal["ask", "task", "feature"]
 Clarity = Literal["clear", "unclear"]
 Complexity = Literal["simple", "complex"]
+# The work domain the Analyzer assigns, used by deterministic code to gate which
+# tools a request may use (§8.6). ``coding`` work is self-contained against local
+# context, so it skips external web research; ``general`` is the safe default.
+Domain = Literal["coding", "research", "general"]
 
 
 class _Strict(BaseModel):
@@ -90,6 +94,9 @@ class Analysis(_Strict):
     rationale: str
     plan: PlanDraft | None = None
     clarify: list[str] | None = None
+    # Advisory work domain (default ``general``) that deterministic code maps to
+    # an allowed tool set (§8.6). Optional so older replies still validate.
+    domain: Domain = "general"
 
 
 class Source(_Strict):

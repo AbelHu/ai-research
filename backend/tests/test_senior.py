@@ -144,3 +144,45 @@ def test_task_can_run_multiple_steps_until_done(db) -> None:
 
     steps = steps_repo.list_steps(db, job.id)
     assert len(steps) == 2  # two executed actions, then done signal
+
+
+def test_coding_task_catalog_excludes_web_research_tools(db) -> None:
+    # A coding task is offered no external web-research tools (§8.6): the catalog
+    # rendered into the worker's prompt must not contain web.search / web.fetch.
+    spec = PlanSpec(phases=[PhaseSpec(title="P", tasks=[TaskSpec(title="refactor module")])])
+    req, job, plan = _approved_plan(db, spec)
+    phase = plans_repo.list_phases(db, plan.id)[0]
+    plans_repo.set_phase_status(db, phase.id, "Active", actor=Role.boss)
+
+    from tests.fakes import FakeProvider
+
+    provider = FakeProvider(SEARCH_ACTION)
+    advisor = Advisor(resolve_provider=lambda _role: provider, conn=db)
+    task = plans_repo.list_tasks(db, phase.id)[0]
+
+    run_task(db, advisor, task, request_id=req.id, job_id=job.id, user_id=None, domain="coding")
+
+    prompt = provider.calls[-1].messages[0]["content"]
+    assert "web.search" not in prompt
+    assert "web.fetch" not in prompt
+    assert "memory.search" in prompt  # local tools are still offered
+
+
+def test_general_task_catalog_includes_web_research_tools(db) -> None:
+    # A non-coding task keeps the full catalog, including web.search.
+    spec = PlanSpec(phases=[PhaseSpec(title="P", tasks=[TaskSpec(title="compare vendors")])])
+    req, job, plan = _approved_plan(db, spec)
+    phase = plans_repo.list_phases(db, plan.id)[0]
+    plans_repo.set_phase_status(db, phase.id, "Active", actor=Role.boss)
+
+    from tests.fakes import FakeProvider
+
+    provider = FakeProvider(SEARCH_ACTION)
+    advisor = Advisor(resolve_provider=lambda _role: provider, conn=db)
+    task = plans_repo.list_tasks(db, phase.id)[0]
+
+    run_task(db, advisor, task, request_id=req.id, job_id=job.id, user_id=None, domain="general")
+
+    prompt = provider.calls[-1].messages[0]["content"]
+    assert "web.search" in prompt
+

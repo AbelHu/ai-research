@@ -182,3 +182,69 @@ def test_junior_stores_research_findings_as_temporary_memories(conn, monkeypatch
     # Follow-up reuse marker: source ref + entity key are present for lookup/dedup.
     assert mem.source_ref == "https://open-meteo.com/"
     assert mem.entity_key.startswith("data.weather:")
+
+
+# A research-loop "done" action so the loop sends its prompt then stops without
+# actually running a tool (keeps the catalog-gating assertions offline).
+RESEARCH_DONE = json.dumps(
+    {"skill": "data.weather", "params": {}, "rationale": "done", "done": True}
+)
+
+
+def test_coding_ask_excludes_web_tools_from_research(conn, monkeypatch) -> None:
+    # Simulate Tavily configured so web.search would normally be offered.
+    monkeypatch.setattr(
+        junior, "_research_tool_names", lambda: {"web.search", "web.fetch", "data.weather"}
+    )
+    planner = FakeProvider([RESEARCH_DONE])
+    providers = {"planner": planner, "drafter": FakeProvider([ANSWER])}
+    advisor = Advisor(
+        resolve_provider=lambda role: providers[role], conn=conn, verify_url=lambda _u: True
+    )
+
+    req = requests_repo.create_request(conn, title="refactor my function")
+    job = requests_repo.create_job(conn, request_id=req.id, kind="ask", complexity="simple")
+    card = {
+        "request_id": req.id,
+        "request_code": req.code,
+        "title": req.title,
+        "text": "Refactor this Python function to be cleaner.",
+        "append": False,
+        "domain": "coding",
+    }
+
+    junior.answer_ask(conn, advisor, card, user_id=None, job_id=job.id)
+
+    # The research catalog shown to the planner excludes web tools for coding.
+    planner_prompt = planner.calls[-1].messages[0]["content"]
+    assert "web.search" not in planner_prompt
+    assert "web.fetch" not in planner_prompt
+    assert "data.weather" in planner_prompt  # non-web research tool still offered
+
+
+def test_general_ask_offers_web_tools_in_research(conn, monkeypatch) -> None:
+    monkeypatch.setattr(
+        junior, "_research_tool_names", lambda: {"web.search", "web.fetch", "data.weather"}
+    )
+    planner = FakeProvider([RESEARCH_DONE])
+    providers = {"planner": planner, "drafter": FakeProvider([ANSWER])}
+    advisor = Advisor(
+        resolve_provider=lambda role: providers[role], conn=conn, verify_url=lambda _u: True
+    )
+
+    req = requests_repo.create_request(conn, title="latest news on vendors")
+    job = requests_repo.create_job(conn, request_id=req.id, kind="ask", complexity="simple")
+    card = {
+        "request_id": req.id,
+        "request_code": req.code,
+        "title": req.title,
+        "text": "What's the latest pricing for these vendors?",
+        "append": False,
+        "domain": "general",
+    }
+
+    junior.answer_ask(conn, advisor, card, user_id=None, job_id=job.id)
+
+    planner_prompt = planner.calls[-1].messages[0]["content"]
+    assert "web.search" in planner_prompt
+

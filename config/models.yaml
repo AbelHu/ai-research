@@ -13,11 +13,11 @@ roles:
 providers:
   fast:
     kind: github_copilot             # Route A: device-flow login (python -m app.cli.login)
-    model: gpt-4o-mini               # bare model id (no {publisher}/ prefix)
+    model: gpt-55               # bare model id (no {publisher}/ prefix)
 
   quality:
     kind: github_copilot
-    model: gpt-4o
+    model: claude-opus-4-8
 
   embed:
     # GitHub Copilot has no embeddings endpoint, so the embedder stays on

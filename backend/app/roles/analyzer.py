@@ -88,11 +88,17 @@ def analyze(
         )
         job_id = job.id
 
+    # Carry the advised work domain on the card so the downstream worker
+    # (Junior ask path / Senior task path) can gate its tool set deterministically
+    # (§8.6). The AI only advises the domain; code decides the allowed tools.
+    card["domain"] = analysis.domain
+
     payload = {
         "verdict": verdict,
         "kind": analysis.kind,
         "clarity": analysis.clarity,
         "complexity": analysis.complexity,
+        "domain": analysis.domain,
         "job_id": job_id,
         "clarify": analysis.clarify,
         "card": card,
