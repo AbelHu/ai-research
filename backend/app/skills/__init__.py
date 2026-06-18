@@ -7,6 +7,18 @@ Importing this package triggers ``@skill`` registration for every skill module
 
 from __future__ import annotations
 
-from app.skills import data, library, memory, web  # noqa: F401  (imported for @skill side effects)
+from app.skills import (  # noqa: F401  (imported for @skill side effects)
+    codegen,
+    data,
+    library,
+    memory,
+    web,
+)
 
-__all__ = ["data", "library", "memory", "web"]
+# Re-register any user-confirmed ("active") generated skills so a confirmed skill
+# survives a process restart; inert bundles stay out until confirmed
+# (`codegen.confirm_and_activate`). A broken bundle is skipped (logged), never
+# fatal to startup.
+codegen.load_active()
+
+__all__ = ["codegen", "data", "library", "memory", "web"]

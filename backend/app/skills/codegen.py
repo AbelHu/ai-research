@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger("app.skills.codegen")
 
 # Real default location (overridden in tests). Sibling of this module.
 GENERATED_ROOT = Path(__file__).resolve().parent / "generated"
@@ -101,12 +105,13 @@ def is_inert(root: Path, job_code: str) -> bool:
     return bundle is not None and bundle.status == STATUS_INERT
 
 
-def activate_generated(root: Path, job_code: str) -> list[str]:
-    """Load + register a job's generated skills; flip the manifest to ``active``.
+def _import_bundle(root: Path, job_code: str) -> list[str]:
+    """Import a bundle's modules so their ``@skill`` decorators register.
 
-    Imports each generated module by path so its ``@skill`` decorators run
-    against the live registry. Returns the names newly present in the catalog
-    after activation. Call **only** after review + user confirmation (§6B).
+    Idempotent within a process: a module already in ``sys.modules`` is skipped
+    (standard Python import caching), so re-loading the same bundle is a no-op.
+    Returns the skill names newly added to the registry. Does **not** touch the
+    manifest — the caller owns the status transition.
     """
     from app.skills.registry import REGISTRY
 
@@ -116,21 +121,35 @@ def activate_generated(root: Path, job_code: str) -> list[str]:
 
     before = set(REGISTRY)
     for filename in bundle.files:
-        path = bundle.folder / filename
         module_name = f"app.skills.generated.{job_code}.{Path(filename).stem}"
+        if module_name in sys.modules:
+            continue  # already loaded in this process
+        path = bundle.folder / filename
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:  # pragma: no cover - defensive
             raise GeneratedActivationError(f"cannot load generated module: {path}")
         module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
         try:
             spec.loader.exec_module(module)
         except Exception as exc:  # noqa: BLE001 - surface any generated-code error
+            del sys.modules[module_name]
             raise GeneratedActivationError(f"failed to activate {path}: {exc}") from exc
+    return sorted(set(REGISTRY) - before)
 
+
+def activate_generated(root: Path, job_code: str) -> list[str]:
+    """Load + register a job's generated skills; flip the manifest to ``active``.
+
+    Imports each generated module by path so its ``@skill`` decorators run
+    against the live registry. Returns the names newly present in the catalog
+    after activation. Call **only** after review + user confirmation (§6B).
+    """
+    newly = _import_bundle(root, job_code)
     manifest = _load_manifest(root, job_code)
     manifest["status"] = STATUS_ACTIVE
     _write_manifest(root, job_code, manifest)
-    return sorted(set(REGISTRY) - before)
+    return newly
 
 
 def confirm_and_activate(root: Path, job_code: str, *, confirmed: bool) -> list[str]:
@@ -144,3 +163,38 @@ def confirm_and_activate(root: Path, job_code: str, *, confirmed: bool) -> list[
     if not confirmed:
         return []
     return activate_generated(root, job_code)
+
+
+def list_bundles(root: Path | None = None) -> list[GeneratedBundle]:
+    """Every generated bundle under ``root`` (for review / the confirm CLI)."""
+    root = root if root is not None else GENERATED_ROOT
+    if not root.exists():
+        return []
+    bundles: list[GeneratedBundle] = []
+    for child in sorted(root.iterdir()):
+        if child.is_dir() and _manifest_path(root, child.name).exists():
+            bundle = get_bundle(root, child.name)
+            if bundle is not None:
+                bundles.append(bundle)
+    return bundles
+
+
+def load_active(root: Path | None = None) -> list[str]:
+    """Re-register every **active** generated bundle (idempotent; for startup).
+
+    A bundle's status is flipped to ``active`` at user confirmation
+    (`confirm_and_activate`); this imports those bundles again on process start so
+    confirmed skills survive a restart. Inert bundles are skipped (they stay out
+    of the catalog until confirmed). Per-bundle failures are **logged, not
+    raised**, so one bad bundle can never block process startup.
+    """
+    root = root if root is not None else GENERATED_ROOT
+    newly: list[str] = []
+    for bundle in list_bundles(root):
+        if bundle.status != STATUS_ACTIVE:
+            continue
+        try:
+            newly.extend(_import_bundle(root, bundle.job_code))
+        except Exception as exc:  # noqa: BLE001 - a bad bundle must not block startup
+            logger.warning("skipping active generated bundle %r: %s", bundle.job_code, exc)
+    return newly
