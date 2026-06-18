@@ -58,6 +58,16 @@ class ProviderConfig(BaseModel):
     base_url: str | None = None
     api_key_env: str | None = None
     org_env: str | None = None
+    # HTTP timeout (seconds) for a single model call, or ``None`` (the default)
+    # for **no timeout** — long-running reasoning/codegen jobs are not aborted, so
+    # progress can be checked over time. Set a number per provider in models.yaml
+    # only if you want a hard cap.
+    timeout: float | None = None
+    # Max output tokens for a single call. Reasoning models can otherwise burn
+    # their whole (default) budget on hidden reasoning and return **no** message;
+    # set this generously per provider in models.yaml. ``None`` lets the server
+    # decide.
+    max_tokens: int | None = None
 
 
 class ModelsConfig(BaseModel):

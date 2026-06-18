@@ -34,6 +34,12 @@ DEFAULT_API_MODE = "chat_completions"
 _API_MODE_PATHS = {"chat_completions": "chat/completions"}
 SUPPORTED_API_MODES = frozenset(_API_MODE_PATHS)
 
+# Some GitHub Copilot models (reasoning models such as gpt-5.5 / gpt-5.3-codex)
+# are exposed ONLY via the OpenAI **Responses** API (POST ``{base_url}/responses``)
+# and reject ``/chat/completions`` with a 400. Setting ``api_mode: responses`` on a
+# github_copilot provider routes it through GitHubCopilotResponsesProvider.
+RESPONSES_API_MODE = "responses"
+
 
 def _as_secret(value: Secret | str | None) -> Secret | None:
     """Normalize an API key into a `Secret` (or None) so it cannot leak."""
@@ -68,6 +74,28 @@ def _raise_for_status(resp: httpx.Response) -> None:
         request=request,
         response=resp,
     )
+
+
+def _responses_text(data: dict) -> str:
+    """Extract the assistant text from an OpenAI Responses API payload.
+
+    The Responses API returns an ``output`` array that interleaves ``reasoning``
+    items (hidden chain-of-thought) with the final ``message`` item. The
+    convenience ``output_text`` field is sometimes empty even when a message is
+    present, so we prefer it only when populated and otherwise concatenate the
+    text parts of ``message`` items (skipping ``reasoning`` items).
+    """
+    top = data.get("output_text")
+    if isinstance(top, str) and top.strip():
+        return top
+    parts: list[str] = []
+    for item in data.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for chunk in item.get("content") or []:
+            if chunk.get("type") in ("output_text", "text") and chunk.get("text"):
+                parts.append(chunk["text"])
+    return "".join(parts)
 
 
 @dataclass
@@ -116,7 +144,8 @@ class OpenAICompatibleProvider:
         api_key: Secret | str | None = None,
         api_mode: str = DEFAULT_API_MODE,
         extra_headers: dict | None = None,
-        timeout: float = 60.0,
+        timeout: float | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         if api_mode not in _API_MODE_PATHS:
             supported = ", ".join(sorted(SUPPORTED_API_MODES))
@@ -128,6 +157,7 @@ class OpenAICompatibleProvider:
         self._api_key = _as_secret(api_key)
         self._extra_headers = extra_headers or {}
         self._timeout = timeout
+        self._max_tokens = max_tokens
 
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json", **self._extra_headers}
@@ -143,8 +173,9 @@ class OpenAICompatibleProvider:
             "messages": redact_messages(req.messages),
             "temperature": req.temperature,
         }
-        if req.max_tokens is not None:
-            payload["max_tokens"] = req.max_tokens
+        max_tokens = req.max_tokens if req.max_tokens is not None else self._max_tokens
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         # We deliberately do NOT send `response_format` (OpenAI JSON mode): the
         # request body is already JSON (Content-Type: application/json) and the
         # prompt templates ask for a JSON reply, which the advisor wrapper parses
@@ -161,7 +192,11 @@ class OpenAICompatibleProvider:
             _raise_for_status(resp)
             data = resp.json()
 
-        text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        # A reasoning model that exhausts its token budget on hidden reasoning can
+        # return an **empty** ``choices`` array (no message); treat that as empty
+        # text so the advisor repairs/escalates instead of crashing.
+        choices = data.get("choices") or []
+        text = (choices[0].get("message", {}).get("content") if choices else "") or ""
         return CompletionResponse(text=text, model=self.model, raw=data)
 
     def embed(self, req: EmbedRequest) -> EmbedResponse:
@@ -189,7 +224,15 @@ class GitHubModelsProvider(OpenAICompatibleProvider):
     tracked against your enterprise organization.
     """
 
-    def __init__(self, *, token: Secret | str, model: str, org: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        token: Secret | str,
+        model: str,
+        org: str | None = None,
+        timeout: float | None = None,
+        max_tokens: int | None = None,
+    ) -> None:
         if org:
             base_url = f"{GITHUB_MODELS_HOST}/orgs/{org}/inference"
         else:
@@ -202,6 +245,8 @@ class GitHubModelsProvider(OpenAICompatibleProvider):
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": GITHUB_MODELS_API_VERSION,
             },
+            timeout=timeout,
+            max_tokens=max_tokens,
         )
         self.org = org
 
@@ -215,7 +260,9 @@ class GitHubCopilotProvider(OpenAICompatibleProvider):
     token never appears in config — it comes from the git-ignored auth cache.
     """
 
-    def __init__(self, *, auth, model: str, timeout: float = 60.0) -> None:
+    def __init__(
+        self, *, auth, model: str, timeout: float | None = None, max_tokens: int | None = None
+    ) -> None:
         from app.advisor.auth import (
             COPILOT_API_BASE,
             COPILOT_INTEGRATION_ID,
@@ -234,6 +281,7 @@ class GitHubCopilotProvider(OpenAICompatibleProvider):
                 "User-Agent": USER_AGENT,
             },
             timeout=timeout,
+            max_tokens=max_tokens,
         )
         self._auth = auth
 
@@ -243,6 +291,45 @@ class GitHubCopilotProvider(OpenAICompatibleProvider):
         headers = {"Content-Type": "application/json", **self._extra_headers}
         headers["Authorization"] = f"Bearer {self._auth.get_bearer()}"
         return headers
+
+
+class GitHubCopilotResponsesProvider(GitHubCopilotProvider):
+    """GitHub Copilot models exposed only via the OpenAI Responses API.
+
+    Reasoning models (e.g. ``gpt-5.5``, ``gpt-5.3-codex``) advertise
+    ``supported_endpoints: ['/responses']`` and return a 400 on
+    ``/chat/completions``. This subclass keeps the same device-flow auth and
+    headers but speaks the Responses protocol: it sends ``input`` (instead of
+    ``messages``) and reads the reply from the ``output`` array.
+    """
+
+    def complete(self, req: CompletionRequest) -> CompletionResponse:
+        # O16: scrub secrets from every message before it leaves the machine.
+        body: dict = {"model": self.model, "input": redact_messages(req.messages)}
+        max_tokens = req.max_tokens if req.max_tokens is not None else self._max_tokens
+        if max_tokens is not None:
+            body["max_output_tokens"] = max_tokens
+        # Reasoning models on /responses only accept the default temperature, so
+        # we deliberately omit it rather than risk a 400.
+
+        with httpx.Client(timeout=self._timeout) as client:
+            resp = client.post(
+                f"{self.base_url}/responses",
+                headers=self._headers(),
+                json=body,
+            )
+            _raise_for_status(resp)
+            data = resp.json()
+
+        return CompletionResponse(
+            text=_responses_text(data), model=data.get("model") or self.model, raw=data
+        )
+
+    def embed(self, req: EmbedRequest) -> EmbedResponse:
+        raise NotImplementedError(
+            "GitHubCopilotResponsesProvider does not support embeddings; "
+            "configure an embedding-capable provider for the embed role"
+        )
 
 
 def build_provider(provider_cfg, *, getenv=os.getenv) -> AIProvider:
@@ -257,13 +344,30 @@ def build_provider(provider_cfg, *, getenv=os.getenv) -> AIProvider:
         if not token:
             raise MissingCredentialError(provider_cfg.api_key_env or "GITHUB_MODELS_TOKEN")
         org = getenv(provider_cfg.org_env) if provider_cfg.org_env else None
-        return GitHubModelsProvider(token=Secret(token), model=provider_cfg.model, org=org or None)
+        return GitHubModelsProvider(
+            token=Secret(token),
+            model=provider_cfg.model,
+            org=org or None,
+            timeout=provider_cfg.timeout,
+            max_tokens=provider_cfg.max_tokens,
+        )
 
     if kind == "github_copilot":
         # Route A: no api_key_env — the bearer comes from the device-flow cache.
         from app.advisor.auth import GitHubCopilotAuth
 
-        return GitHubCopilotProvider(auth=GitHubCopilotAuth(), model=provider_cfg.model)
+        # Reasoning models exposed only on /responses opt in via api_mode.
+        provider_cls = (
+            GitHubCopilotResponsesProvider
+            if provider_cfg.api_mode == RESPONSES_API_MODE
+            else GitHubCopilotProvider
+        )
+        return provider_cls(
+            auth=GitHubCopilotAuth(),
+            model=provider_cfg.model,
+            timeout=provider_cfg.timeout,
+            max_tokens=provider_cfg.max_tokens,
+        )
 
     if kind == "openai_compatible":
         if not provider_cfg.base_url:
@@ -274,6 +378,8 @@ def build_provider(provider_cfg, *, getenv=os.getenv) -> AIProvider:
             model=provider_cfg.model,
             api_key=Secret(raw_key) if raw_key else None,
             api_mode=provider_cfg.api_mode,
+            timeout=provider_cfg.timeout,
+            max_tokens=provider_cfg.max_tokens,
         )
 
     if kind == "ollama":
@@ -282,7 +388,11 @@ def build_provider(provider_cfg, *, getenv=os.getenv) -> AIProvider:
         if not base_url.endswith("/v1"):
             base_url = f"{base_url}/v1"
         return OpenAICompatibleProvider(
-            base_url=base_url, model=provider_cfg.model, api_mode=provider_cfg.api_mode
+            base_url=base_url,
+            model=provider_cfg.model,
+            api_mode=provider_cfg.api_mode,
+            timeout=provider_cfg.timeout,
+            max_tokens=provider_cfg.max_tokens,
         )
 
     raise ValueError(f"unknown provider kind: {kind!r}")

@@ -42,12 +42,17 @@ def run(params, ctx):
 
 Rules:
 - Every skill ``name`` **must** start with ``generated.``.
-- Keep skills **pure and read-only** (`effect="read"`): no file/network/DB writes,
-  no imports beyond the standard library + `pydantic` + `app.skills.registry`.
+- Keep skills **pure and read-only** (`effect="read"`): no file/network/DB writes.
+- **Only the Python standard library + `pydantic` + `app.skills.registry` are
+  available.** Third-party packages (e.g. Pillow/PIL, numpy, requests) are **not
+  installed** and will fail — to make an image, build an **SVG string** with the
+  standard library (SVG is just text).
 - Each skill module must be importable on its own — a skill module must **not**
   import another generated module in the same bundle.
 - Each test filename **must** start with `test_`, and it imports a skill module by
-  its bare module name (e.g. `from <module> import run, Params`).
+  its bare module name (e.g. `from <module> import run, Params`). Tests must
+  **actually run and assert behavior** — a test that `skip`s (e.g. for a missing
+  dependency) is treated as a failure.
 
 Respond with a **single JSON object** only (no prose, no code fences):
 - `files`: array of `{ "filename": "<snake>.py", "code": "<full source>" }` — the

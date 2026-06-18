@@ -101,6 +101,24 @@ def test_passing_test_passes(tmp_path) -> None:
     assert report.by_name("tests").ok
 
 
+def test_all_skipped_tests_do_not_pass(tmp_path) -> None:
+    # A skill whose tests all skip (e.g. an unavailable dependency) is NOT
+    # validated — `tests` must require at least one real pass.
+    _bundle(
+        tmp_path,
+        **{
+            "m.py": "def add(a, b):\n    return a + b\n",
+            "test_m.py": (
+                "import pytest\n\n\ndef test_add():\n    pytest.skip('dependency unavailable')\n"
+            ),
+        },
+    )
+    report = run_checks(tmp_path, sandbox=RlimitSandbox(), timeout=60)
+    tests = report.by_name("tests")
+    assert tests is not None and not tests.ok  # all-skipped is treated as failure
+    assert not report.ok
+
+
 def test_timeout_is_reported(tmp_path) -> None:
     _bundle(tmp_path, **{"slow.py": "import time\n\ntime.sleep(5)\n"})
     report = run_checks(tmp_path, sandbox=RlimitSandbox(), timeout=1, run_tests=False)

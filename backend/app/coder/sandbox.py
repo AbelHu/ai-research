@@ -32,7 +32,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -335,27 +335,37 @@ def run_checks(
     elif not has_tests:
         checks.append(_skipped("tests", "no test files in bundle"))
     else:
-        checks.append(
-            _run_check(
-                sandbox,
-                "tests",
-                [
-                    sys.executable,
-                    "-m",
-                    "pytest",
-                    "-q",
-                    "-p",
-                    "no:cacheprovider",
-                    "--rootdir",
-                    str(bundle),
-                    "--confcutdir",
-                    str(bundle),
-                    str(bundle),
-                ],
-                cwd=bundle,
-                env=env,
-                timeout=timeout,
-            )
+        result = _run_check(
+            sandbox,
+            "tests",
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "--rootdir",
+                str(bundle),
+                "--confcutdir",
+                str(bundle),
+                str(bundle),
+            ],
+            cwd=bundle,
+            env=env,
+            timeout=timeout,
         )
+        # Tests that are merely *collected and skipped* (e.g. a skill that needs
+        # an unavailable third-party package and skips) are NOT a real check.
+        # Require at least one test to actually pass.
+        if result.ok and "passed" not in result.output:
+            note = (
+                "\n[validation] tests were collected but none passed (all skipped?). "
+                "A generated skill must work with only the Python standard library + "
+                "pydantic; do not depend on packages that may be unavailable, and write "
+                "tests that actually run and assert behavior rather than skipping."
+            )
+            result = replace(result, ok=False, output=result.output + note)
+        checks.append(result)
 
     return ValidationReport(ok=all(c.ok for c in checks), checks=tuple(checks))

@@ -7,17 +7,29 @@ roles:
   drafter: quality
   extractor: fast
   embedder: embed
+  coder: coder              # feature codegen (app.coder.agent) — a fast code model
   # NOTE: web search is handled by the deterministic web.search skill (Bing),
   # not a model role - GitHub Models has no native web-search tool.
 
 providers:
   fast:
     kind: github_copilot             # Route A: device-flow login (python -m app.cli.login)
-    model: gpt-5.5               # bare model id (no {publisher}/ prefix)
+    model: gpt-4o-mini          # fast/cheap for triage + extraction (bare model id)
 
   quality:
     kind: github_copilot
     model: claude-opus-4.8
+    max_tokens: 64000          # opus reasons a lot; without headroom it returns no message
+
+  coder:
+    # Code generation uses gpt-5.3-codex, a model purpose-built for code. It is
+    # exposed ONLY via the OpenAI Responses API (supported_endpoints:
+    # ['/responses']) and rejects /chat/completions, so api_mode must be
+    # `responses` (routes through GitHubCopilotResponsesProvider).
+    kind: github_copilot
+    model: gpt-5.3-codex
+    api_mode: responses
+    max_tokens: 16000
 
   embed:
     # GitHub Copilot has no embeddings endpoint, so the embedder stays on

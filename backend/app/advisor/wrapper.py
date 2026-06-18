@@ -324,7 +324,7 @@ class Advisor:
         activation (§5/§6B; P2/P3).
         """
         return self._run(
-            role="planner",
+            role="coder",
             template_name="coder.bundle",
             variables={"goal": goal},
             schema=GeneratedSkillBundle,
@@ -349,7 +349,7 @@ class Advisor:
         deterministic fallback — an unvalidatable repair escalates.
         """
         return self._run(
-            role="planner",
+            role="coder",
             template_name="coder.repair",
             variables={"goal": goal, "previous_code": previous_code, "failures": failures},
             schema=GeneratedSkillBundle,

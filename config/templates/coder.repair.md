@@ -14,10 +14,11 @@ Validation failures (sandbox output — import / lint / tests):
 {{ failures }}
 
 Fix the root cause of every failure. Keep all the rules: skills named
-``generated.*``; pure and read-only (`effect="read"`); imports limited to the
-standard library + `pydantic` + `app.skills.registry`; each skill module
-independently importable (no importing another generated module in the bundle);
-and at least one `test_*.py` that imports a skill module by its bare name.
+``generated.*``; pure and read-only (`effect="read"`); **only the Python standard
+library + `pydantic` + `app.skills.registry` are available** (no third-party
+packages like Pillow/numpy — to make an image, build an **SVG string** with the
+stdlib); each skill module independently importable; and at least one `test_*.py`
+whose tests **actually run and pass** (a skipped test counts as a failure).
 
 Respond with a **single JSON object** only (no prose, no code fences):
 - `files`: array of `{ "filename": "<snake>.py", "code": "<full source>" }`.

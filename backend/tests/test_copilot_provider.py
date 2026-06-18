@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from app.advisor.auth import COPILOT_API_BASE, GitHubCopilotAuth
 from app.advisor.providers import (
     CompletionRequest,
+    EmbedRequest,
     GitHubCopilotProvider,
+    GitHubCopilotResponsesProvider,
     build_provider,
 )
 from app.config.settings import ProviderConfig
@@ -96,3 +99,117 @@ def test_copilot_provider_does_not_need_api_key_env() -> None:
     # build must not raise MissingCredentialError for github_copilot.
     cfg = ProviderConfig(kind="github_copilot", model="gpt-4o-mini")
     build_provider(cfg, getenv=lambda _k: None)  # no env at all → still builds
+
+
+# --- Responses API transport (gpt-5.5 / gpt-5.3-codex, /responses only) -------
+
+
+def _mock_responses_factory(captured: dict, *, output_text: str = ""):
+    """Mock httpx.Client that returns an OpenAI Responses-API payload.
+
+    The ``output`` array interleaves a hidden ``reasoning`` item with the final
+    ``message`` item, matching what the real endpoint returns.
+    """
+    real_client = httpx.Client
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(
+            200,
+            json={
+                "model": "gpt-5.3-codex",
+                "status": "completed",
+                "output_text": output_text,
+                "output": [
+                    {"type": "reasoning", "content": [{"type": "text", "text": "thinking"}]},
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "pong"}],
+                    },
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        )
+
+    def factory(*_args: object, **_kwargs: object) -> httpx.Client:
+        return real_client(transport=httpx.MockTransport(handler))
+
+    return factory
+
+
+def test_responses_provider_sends_input_and_parses_message(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(httpx, "Client", _mock_responses_factory(captured))
+    provider = GitHubCopilotResponsesProvider(
+        auth=_StubAuth("copilot-xyz"), model="gpt-5.3-codex", max_tokens=2048
+    )
+
+    resp = provider.complete(
+        CompletionRequest(messages=[{"role": "user", "content": "ping"}], max_tokens=2048)
+    )
+
+    req = captured["request"]
+    assert str(req.url) == f"{COPILOT_API_BASE}/responses"
+    assert req.headers["Authorization"] == "Bearer copilot-xyz"
+    body = json.loads(req.content)
+    # Responses protocol: `input`, not `messages`; max_output_tokens, not max_tokens.
+    assert body["input"] == [{"role": "user", "content": "ping"}]
+    assert body["max_output_tokens"] == 2048
+    assert "messages" not in body
+    assert "max_tokens" not in body
+    # Reasoning models reject a non-default temperature, so we never send one.
+    assert "temperature" not in body
+    # Text is pulled from the `message` item, skipping the `reasoning` item.
+    assert resp.text == "pong"
+    assert resp.model == "gpt-5.3-codex"
+
+
+def test_responses_provider_prefers_output_text_when_present(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(httpx, "Client", _mock_responses_factory(captured, output_text="hi there"))
+    provider = GitHubCopilotResponsesProvider(auth=_StubAuth(), model="gpt-5.5")
+
+    resp = provider.complete(CompletionRequest(messages=[{"role": "user", "content": "x"}]))
+    assert resp.text == "hi there"
+
+
+def test_responses_provider_redacts_secrets(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(httpx, "Client", _mock_responses_factory(captured))
+    provider = GitHubCopilotResponsesProvider(auth=_StubAuth(), model="gpt-5.3-codex")
+
+    secret = "ghp_0123456789abcdefghijklmnopqrstuvwxyzABCD"
+    provider.complete(CompletionRequest(messages=[{"role": "user", "content": f"tok {secret}"}]))
+
+    assert secret not in captured["request"].content.decode()
+
+
+def test_responses_provider_omits_max_output_tokens_when_unset(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(httpx, "Client", _mock_responses_factory(captured))
+    provider = GitHubCopilotResponsesProvider(auth=_StubAuth(), model="gpt-5.5")
+
+    provider.complete(CompletionRequest(messages=[{"role": "user", "content": "x"}]))
+    assert "max_output_tokens" not in json.loads(captured["request"].content)
+
+
+def test_responses_provider_embed_not_supported() -> None:
+    provider = GitHubCopilotResponsesProvider(auth=_StubAuth(), model="gpt-5.5")
+    with pytest.raises(NotImplementedError):
+        provider.embed(EmbedRequest(texts=["hi"]))
+
+
+def test_build_provider_selects_responses_transport() -> None:
+    cfg = ProviderConfig(kind="github_copilot", model="gpt-5.3-codex", api_mode="responses")
+    provider = build_provider(cfg)
+    assert isinstance(provider, GitHubCopilotResponsesProvider)
+    assert provider.model == "gpt-5.3-codex"
+
+
+def test_build_provider_defaults_to_chat_transport() -> None:
+    # Without api_mode=responses, github_copilot stays on /chat/completions.
+    cfg = ProviderConfig(kind="github_copilot", model="gpt-4o")
+    provider = build_provider(cfg)
+    assert isinstance(provider, GitHubCopilotProvider)
+    assert not isinstance(provider, GitHubCopilotResponsesProvider)
