@@ -16,7 +16,8 @@ import importlib.util
 import json
 import logging
 import sys
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger("app.skills.codegen")
@@ -41,10 +42,17 @@ class GeneratedBundle:
     folder: Path
     files: list[str]
     status: str
+    test_files: list[str] = field(default_factory=list)
 
 
 def _manifest_path(root: Path, job_code: str) -> Path:
     return root / job_code / MANIFEST_NAME
+
+
+def _validate_filename(filename: str) -> None:
+    """Reject anything that isn't a bare ``*.py`` name (no paths, no dotfiles)."""
+    if not filename.endswith(".py") or "/" in filename or filename.startswith("."):
+        raise ValueError(f"invalid generated filename: {filename!r}")
 
 
 def write_generated_skill(
@@ -58,8 +66,7 @@ def write_generated_skill(
     Returns the written file path. The code is **not** imported or executed —
     it only lands on disk and is recorded in the manifest as ``inert``.
     """
-    if not filename.endswith(".py") or "/" in filename or filename.startswith("."):
-        raise ValueError(f"invalid generated filename: {filename!r}")
+    _validate_filename(filename)
     folder = root / job_code
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / filename
@@ -73,11 +80,51 @@ def write_generated_skill(
     return path
 
 
+def write_generated_bundle(
+    root: Path,
+    job_code: str,
+    *,
+    files: Sequence[tuple[str, str]],
+    test_files: Sequence[tuple[str, str]] = (),
+) -> list[Path]:
+    """Write a multi-file inert bundle (skill modules + optional tests) + manifest.
+
+    ``files`` are the skill module(s) activation will import; ``test_files`` are
+    **validation-only** (run by pytest in the Coder sandbox) and are *never*
+    imported on activation. Each entry is ``(bare_filename, code)``. Returns the
+    written skill-module paths. Code lands on disk **inert** — nothing is imported
+    or executed here.
+    """
+    folder = root / job_code
+    folder.mkdir(parents=True, exist_ok=True)
+    manifest = _load_manifest(root, job_code)
+
+    written: list[Path] = []
+    for filename, code in files:
+        _validate_filename(filename)
+        path = folder / filename
+        path.write_text(code, encoding="utf-8")
+        if filename not in manifest["files"]:
+            manifest["files"].append(filename)
+        written.append(path)
+
+    test_list = manifest.setdefault("test_files", [])
+    for filename, code in test_files:
+        _validate_filename(filename)
+        (folder / filename).write_text(code, encoding="utf-8")
+        if filename not in test_list:
+            test_list.append(filename)
+
+    manifest["status"] = STATUS_INERT
+    _write_manifest(root, job_code, manifest)
+    return written
+
+
 def _load_manifest(root: Path, job_code: str) -> dict:
     path = _manifest_path(root, job_code)
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
-    return {"job_code": job_code, "status": STATUS_INERT, "files": []}
+    return {"job_code": job_code, "status": STATUS_INERT, "files": [], "test_files": []}
 
 
 def _write_manifest(root: Path, job_code: str, manifest: dict) -> None:
@@ -96,6 +143,7 @@ def get_bundle(root: Path, job_code: str) -> GeneratedBundle | None:
         folder=root / job_code,
         files=list(manifest.get("files", [])),
         status=manifest.get("status", STATUS_INERT),
+        test_files=list(manifest.get("test_files", [])),
     )
 
 

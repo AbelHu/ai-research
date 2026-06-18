@@ -192,3 +192,87 @@ def test_confirm_cli_decline_keeps_inert(tmp_path, skill_registry, monkeypatch, 
     assert rc == 0
     assert codegen.is_inert(tmp_path, code) is True
     assert get_skill("generated.declined_echo") is None
+
+
+# --- multi-file bundles (P2) ------------------------------------------------
+
+
+_BUNDLE_SKILL = '''from pydantic import BaseModel
+from app.skills.registry import skill
+
+
+class Params(BaseModel):
+    text: str
+
+
+class Result(BaseModel):
+    echoed: str
+
+
+@skill(
+    name="generated.bundle_double",
+    description="echo the input",
+    params=Params,
+    returns=Result,
+    permissions=[],
+    effect="read",
+)
+def run(params, ctx):
+    return Result(echoed=params.text)
+'''
+
+_BUNDLE_TEST = '''from dbl import Params, run
+
+
+def test_run():
+    assert run(Params(text="x"), None).echoed == "x"
+'''
+
+
+def test_write_generated_bundle_records_files_and_tests(tmp_path) -> None:
+    code = "20260618100000"
+    test_code = "from m import add\n\n\ndef test_add():\n    assert add(1, 1) == 2\n"
+    written = codegen.write_generated_bundle(
+        tmp_path,
+        code,
+        files=[("m.py", "def add(a, b):\n    return a + b\n")],
+        test_files=[("test_m.py", test_code)],
+    )
+    assert [p.name for p in written] == ["m.py"]
+
+    bundle = codegen.get_bundle(tmp_path, code)
+    assert bundle.files == ["m.py"]  # skill modules
+    assert bundle.test_files == ["test_m.py"]  # validation-only
+    assert bundle.status == "inert"
+    assert (tmp_path / code / "test_m.py").exists()
+
+
+def test_bundle_activation_imports_only_skill_modules(tmp_path, skill_registry) -> None:
+    code = "20260618101000"
+    codegen.write_generated_bundle(
+        tmp_path,
+        code,
+        files=[("sk.py", _skill_module("generated.bundle_one"))],
+        test_files=[("test_sk.py", "def test_ok():\n    assert True\n")],
+    )
+    # Only the skill module is imported on activation; the test file is not.
+    activated = codegen.confirm_and_activate(tmp_path, code, confirmed=True)
+    assert activated == ["generated.bundle_one"]
+    assert get_skill("generated.bundle_one") is not None
+
+
+def test_generated_bundle_passes_sandbox_validation(tmp_path) -> None:
+    from app.coder.sandbox import RlimitSandbox, run_checks
+
+    code = "20260618102000"
+    codegen.write_generated_bundle(
+        tmp_path,
+        code,
+        files=[("dbl.py", _BUNDLE_SKILL)],
+        test_files=[("test_dbl.py", _BUNDLE_TEST)],
+    )
+    report = run_checks(tmp_path / code, sandbox=RlimitSandbox(), timeout=60)
+    assert report.ok, report.summary
+    assert report.by_name("import").ok
+    assert report.by_name("lint").ok
+    assert report.by_name("tests").ok

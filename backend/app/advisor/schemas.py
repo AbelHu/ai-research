@@ -197,3 +197,25 @@ class GeneratedSkill(_Strict):
     module_filename: str = Field(..., pattern=r"^[a-z0-9_]+\.py$")
     code: str = Field(..., min_length=1)
     rationale: str = ""
+
+
+class GeneratedFile(_Strict):
+    """One file in a generated skill bundle — a skill module or a test module."""
+
+    filename: str = Field(..., pattern=r"^[a-z0-9_]+\.py$")
+    code: str = Field(..., min_length=1)
+
+
+class GeneratedSkillBundle(_Strict):
+    """A feature job's generated **multi-file** skill bundle (template `coder.bundle`).
+
+    ``files`` are the skill module(s) that get imported on activation; optional
+    ``test_files`` are pytest modules used only to **validate** the bundle in the
+    Coder sandbox — they are never shipped or imported on activation. The model
+    proposes the code; deterministic code writes it inert and validates it in a
+    sandbox before offering activation (§5/§6B; P2/P3).
+    """
+
+    files: list[GeneratedFile] = Field(..., min_length=1)
+    test_files: list[GeneratedFile] = Field(default_factory=list)
+    rationale: str = ""
