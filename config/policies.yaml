@@ -39,6 +39,13 @@ verify_success_criteria: true
 # redraft. 0 disables auto-replan.
 max_replan_attempts: 1
 
+# Coder agent (feature codegen, P3): validate generated skill bundles in a
+# sandbox (import + lint + tests) and repair on failure, bounded. Set
+# coder_validate false to write bundles inert without checks.
+coder_validate: true
+max_coder_iterations: 2
+coder_sandbox_timeout_seconds: 30
+
 # Idle minutes before a Junior Worker's warm ask session is retired (§6A).
 junior_session_idle_minutes: 15
 

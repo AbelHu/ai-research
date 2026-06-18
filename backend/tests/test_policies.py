@@ -35,6 +35,9 @@ def test_defaults_match_spec() -> None:
     assert p.max_task_steps == 3
     assert p.verify_success_criteria is True
     assert p.max_replan_attempts == 1
+    assert p.coder_validate is True
+    assert p.max_coder_iterations == 2
+    assert p.coder_sandbox_timeout_seconds == 30
     assert p.junior_session_idle_minutes == 15
     assert p.progress_updates == "phase"
     assert p.verify_citation_urls is True  # cited-URL check ships ON (§7.1)

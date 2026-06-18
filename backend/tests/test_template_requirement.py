@@ -25,6 +25,7 @@ CASES = [
     ("junior.answer", schemas.AnswerDraft),
     ("coder.generate", schemas.GeneratedSkill),
     ("coder.bundle", schemas.GeneratedSkillBundle),
+    ("coder.repair", schemas.GeneratedSkillBundle),
 ]
 
 

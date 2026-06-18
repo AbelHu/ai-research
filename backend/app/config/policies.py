@@ -91,6 +91,12 @@ class Policies(BaseModel):
     # code/skills (design-spec §5/§6B). Default on: generated code stays inert
     # until explicitly confirmed; deactivating this would auto-activate (unsafe).
     confirm_generated_code: bool = True
+    # Coder agent (feature codegen): validate generated bundles in a sandbox and
+    # repair on failure, bounded (P3). `coder_validate` off writes the bundle inert
+    # without checks; `max_coder_iterations` caps generate+repair attempts.
+    coder_validate: bool = True
+    max_coder_iterations: int = Field(default=2, ge=1)
+    coder_sandbox_timeout_seconds: int = Field(default=30, ge=1)
     # Gateway allowlist (§10.1). A chat bot is publicly reachable, so the Gateway
     # refuses every unpaired sender. `unpaired_reply` chooses whether to send a
     # single "pair first" hint or stay silent; refusals are rate-limited per

@@ -45,6 +45,7 @@ from app.advisor.schemas import (
     CriteriaReport,
     CriterionResult,
     GeneratedSkill,
+    GeneratedSkillBundle,
     PlanSpec,
     ProposedAction,
     Triage,
@@ -304,6 +305,54 @@ class Advisor:
             template_name="coder.generate",
             variables={"goal": goal},
             schema=GeneratedSkill,
+            request_id=request_id,
+            job_id=job_id,
+            fallback=None,
+        )
+
+    def generate_bundle(
+        self,
+        *,
+        goal: str,
+        request_id: int,
+        job_id: int | None = None,
+    ) -> GeneratedSkillBundle:
+        """Generate a feature job's **multi-file** skill bundle (template ``coder.bundle``).
+
+        No deterministic fallback: an unvalidatable proposal **escalates**. The
+        bundle is written inert and validated in the Coder sandbox before
+        activation (§5/§6B; P2/P3).
+        """
+        return self._run(
+            role="planner",
+            template_name="coder.bundle",
+            variables={"goal": goal},
+            schema=GeneratedSkillBundle,
+            request_id=request_id,
+            job_id=job_id,
+            fallback=None,
+        )
+
+    def repair_bundle(
+        self,
+        *,
+        goal: str,
+        previous_code: str,
+        failures: str,
+        request_id: int,
+        job_id: int | None = None,
+    ) -> GeneratedSkillBundle:
+        """Repair a generated bundle that failed sandbox validation (template ``coder.repair``).
+
+        Feeds the prior code + the sandbox failure output back to the model for a
+        corrected bundle (the bounded generate→validate→repair loop, P3). No
+        deterministic fallback — an unvalidatable repair escalates.
+        """
+        return self._run(
+            role="planner",
+            template_name="coder.repair",
+            variables={"goal": goal, "previous_code": previous_code, "failures": failures},
+            schema=GeneratedSkillBundle,
             request_id=request_id,
             job_id=job_id,
             fallback=None,
