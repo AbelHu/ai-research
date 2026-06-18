@@ -11,6 +11,8 @@
 #     OFFLINE (--no-index). Otherwise downloads the pinned versions from PyPI
 #     (still hash-verified). Force a mode with --offline / --online.
 #   * Installs this repo's backend package in editable mode (no extra deps).
+#   * (Linux, optional) Installs `bubblewrap` for the Coder sandbox if it's
+#     missing - non-fatal; the sandbox falls back to resource limits without it.
 #
 # Usage:
 #   ./scripts/setup-env.sh            # auto: offline if wheelhouse exists
@@ -114,6 +116,47 @@ echo "==> Installing the backend package (editable)"
 # --- smoke check -------------------------------------------------------------
 echo "==> Verifying the install"
 "$VENV_PY" -c "import app, pytest, ruff; print('environment OK')"
+
+# --- optional: bubblewrap for the Coder sandbox (Linux only) -----------------
+# The Coder validates generated skills in a sandbox; with bubblewrap (`bwrap`)
+# each check runs in a no-network user namespace. It is OPTIONAL - without it the
+# sandbox falls back to `resource` limits - so any failure here is a warning,
+# never a setup error. Non-interactive sudo (`sudo -n`) is used so this step can
+# never hang on a password prompt.
+ensure_bubblewrap() {
+  if command -v bwrap >/dev/null 2>&1; then
+    echo "==> bubblewrap present ($(command -v bwrap)) - Coder sandbox isolation enabled"
+    return 0
+  fi
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    echo "==> Note: bubblewrap is Linux-only; the Coder sandbox will use the rlimit fallback."
+    return 0
+  fi
+
+  local -a cmd=()
+  if command -v apt-get >/dev/null 2>&1; then
+    cmd=(apt-get install -y bubblewrap)
+  elif command -v dnf >/dev/null 2>&1; then
+    cmd=(dnf install -y bubblewrap)
+  elif command -v pacman >/dev/null 2>&1; then
+    cmd=(pacman -S --noconfirm bubblewrap)
+  elif command -v zypper >/dev/null 2>&1; then
+    cmd=(zypper install -y bubblewrap)
+  fi
+  if [[ ${#cmd[@]} -eq 0 ]]; then
+    echo "==> [warn] bubblewrap missing and no known package manager; install it"
+    echo "           manually for Coder sandbox isolation (optional)."
+    return 0
+  fi
+
+  echo "==> Installing bubblewrap (Coder sandbox isolation)"
+  if sudo -n "${cmd[@]}" >/dev/null 2>&1; then
+    echo "    bubblewrap installed."
+  else
+    echo "    [warn] could not install automatically (needs sudo). Run: sudo ${cmd[*]}"
+  fi
+}
+ensure_bubblewrap
 
 echo
 echo "Done. Next steps (from the repo root):"

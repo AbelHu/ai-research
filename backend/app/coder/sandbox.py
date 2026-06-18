@@ -206,10 +206,12 @@ class BubblewrapSandbox:
             if Path(ro).exists():
                 flags += ["--ro-bind", ro, ro]
         flags += [
-            "--bind", str(cwd), str(cwd),  # writable: only the bundle dir
             "--proc", "/proc",
             "--dev", "/dev",
             "--tmpfs", "/tmp",
+            # Bind the (writable) bundle dir AFTER the tmpfs, so a staging dir
+            # that lives under /tmp isn't shadowed by the tmpfs mount.
+            "--bind", str(cwd), str(cwd),
             "--chdir", str(cwd),
         ]
         return [*flags, "--", *argv]

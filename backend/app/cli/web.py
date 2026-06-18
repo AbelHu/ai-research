@@ -12,7 +12,9 @@ process:
 
 * runs the **Telegram gateway** in a background thread (long-poll → gateway →
   reply) plus the **job worker** that executes planned jobs and delivers their
-  results back to chat, so paired users are answered while the process is up, and
+  results back to chat, and the **coder worker** that fulfils feature jobs
+  (generate → sandbox-validate → promote inert), so paired users are answered
+  while the process is up, and
 * serves the read-only **dashboard + JSON API** over the stdlib (`wsgiref`).
 
 The gateway starts automatically when ``TELEGRAM_BOT_TOKEN`` is set (skip it with
@@ -38,6 +40,7 @@ from wsgiref.simple_server import make_server
 from dotenv import load_dotenv
 
 from app.advisor.providers import MissingCredentialError
+from app.cli.coderworker import serve_coder_jobs
 from app.cli.jobworker import serve_jobs
 from app.cli.telegram import build_bot, serve
 from app.config.settings import REPO_ROOT, get_settings, load_models_config
@@ -116,6 +119,34 @@ def _run_jobworker(db_path: Path) -> None:
             conn.close()
 
 
+def _run_coderworker(db_path: Path) -> None:
+    """Background-thread target: own connection + the coder (feature-codegen) loop.
+
+    Drains the coder queue: generate → sandbox-validate → repair → promote inert,
+    then delivers the "confirm to activate" follow-up. Convenience only — for true
+    privilege separation run the standalone ``python -m app.cli.coderworker`` in
+    its own (restricted) process. Its own SQLite connection shares the WAL
+    database; any failure is logged and ends the thread without taking down the
+    web app.
+    """
+    conn = None
+    try:
+        settings = get_settings()
+        models = load_models_config()
+        conn = connect(db_path)
+        migrate(conn)
+        adapter, advisor = build_bot(conn, settings=settings, models=models)
+        logger.info("background coder worker started")
+        serve_coder_jobs(conn, advisor, adapter.send)
+    except (MissingCredentialError, KeyError, FileNotFoundError) as exc:
+        logger.error("coder worker not started (config error): %s", exc)
+    except Exception as exc:  # noqa: BLE001 - keep the web app alive regardless
+        logger.error("coder worker stopped: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.cli.web",
@@ -156,7 +187,10 @@ def main(argv: list[str] | None = None) -> int:
             threading.Thread(
                 target=_run_jobworker, args=(db_path,), name="job-worker", daemon=True
             ).start()
-            print("[ok]   Telegram gateway + job worker starting in the background.")
+            threading.Thread(
+                target=_run_coderworker, args=(db_path,), name="coder-worker", daemon=True
+            ).start()
+            print("[ok]   Telegram gateway + job worker + coder worker starting in the background.")
         elif args.no_bot:
             print("[ok]   --no-bot: serving the dashboard only.")
         else:
