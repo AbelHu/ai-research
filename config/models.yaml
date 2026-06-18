@@ -22,12 +22,13 @@ providers:
     max_tokens: 64000          # opus reasons a lot; without headroom it returns no message
 
   coder:
-    # Code generation uses gpt-5.3-codex, a model purpose-built for code. It is
-    # exposed ONLY via the OpenAI Responses API (supported_endpoints:
-    # ['/responses']) and rejects /chat/completions, so api_mode must be
-    # `responses` (routes through GitHubCopilotResponsesProvider).
+    # Code generation uses gpt-5.5, a reasoning model exposed ONLY via the OpenAI
+    # Responses API (supported_endpoints: ['/responses']); it rejects
+    # /chat/completions, so api_mode must be `responses` (routes through
+    # GitHubCopilotResponsesProvider). gpt-5.3-codex is a faster code-specialized
+    # alternative on the same endpoint.
     kind: github_copilot
-    model: gpt-5.3-codex
+    model: gpt-5.5
     api_mode: responses
     max_tokens: 16000
 
