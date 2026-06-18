@@ -61,6 +61,7 @@ def _system(conn: sqlite3.Connection) -> tuple[int, object]:
         "metrics": services.system_metrics(),
         "usage": services.model_usage(conn),
         "queue": services.job_queue_overview(conn),
+        "coder_queue": services.coder_queue_overview(conn),
     }
 
 
@@ -218,6 +219,7 @@ def _render_home(conn: sqlite3.Connection) -> str:
 def _render_requests_page(conn: sqlite3.Connection) -> str:
     requests = services.request_overview(conn, limit=100)
     queue = services.job_queue_overview(conn, limit=30)
+    coder = services.coder_queue_overview(conn, limit=30)
     rows = "\n".join(
         f"<tr><td>{_escape(r['code'])}</td><td>{_escape(r['title'])}</td>"
         f"<td>{_escape(r['status'])}</td><td>{_escape(r['state'])}</td>"
@@ -232,6 +234,16 @@ def _render_requests_page(conn: sqlite3.Connection) -> str:
     )
     if not queue_rows:
         queue_rows = "<tr><td colspan='6' class='muted'>No queued jobs yet.</td></tr>"
+    coder_rows = "\n".join(
+        f"<tr><td>{_escape(c['job_id'])}</td><td>{_escape(c['request_code'])}</td>"
+        f"<td>{_escape(c['status'])}</td>"
+        f"<td>{_escape(', '.join(c['skill_modules']) or '—')}</td>"
+        f"<td>{_escape(c['validation_summary'])}</td>"
+        f"<td>{_escape(c['error'])}</td></tr>"
+        for c in coder["jobs"]
+    )
+    if not coder_rows:
+        coder_rows = "<tr><td colspan='6' class='muted'>No coding requests yet.</td></tr>"
     body = f"""
 <h1>Requests ({len(requests)})</h1>
 {_nav()}
@@ -248,6 +260,17 @@ def _render_requests_page(conn: sqlite3.Connection) -> str:
 <th>Job</th><th>Request</th><th>Status</th><th>Attempts</th><th>Last error</th><th>Updated</th>
 </tr>
 {queue_rows}
+</table>
+<h2>Coder Queue (feature codegen)</h2>
+<p class='muted'>Pending: {_escape(coder['by_status']['pending'])}
+ · Running: {_escape(coder['by_status']['running'])}
+ · Done: {_escape(coder['by_status']['done'])}
+ · Failed: {_escape(coder['by_status']['failed'])}</p>
+<table>
+<tr>
+<th>Job</th><th>Request</th><th>Status</th><th>Skills</th><th>Validation</th><th>Last error</th>
+</tr>
+{coder_rows}
 </table>
 """
     return _page_shell(title="Requests", body=body)

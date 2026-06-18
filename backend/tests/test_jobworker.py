@@ -186,7 +186,7 @@ def test_worker_retries_transient_failure_then_succeeds(conn, monkeypatch) -> No
         status = "completed"
         delivery = "done"
 
-    def _flaky_execute(_conn, _advisor, *, job_id, user_id=None):
+    def _flaky_execute(_conn, _advisor, *, job_id, user_id=None, delivery_coords=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise TimeoutError("request timed out")
@@ -210,7 +210,7 @@ def test_worker_marks_failed_after_retry_budget_exhausted(conn, monkeypatch) -> 
     _req, job = _planned_job(conn)
     jq.enqueue(conn, job.id)
 
-    def _always_timeout(_conn, _advisor, *, job_id, user_id=None):
+    def _always_timeout(_conn, _advisor, *, job_id, user_id=None, delivery_coords=None):
         raise TimeoutError("request timed out")
 
     monkeypatch.setattr(jobworker, "execute_planned_job", _always_timeout)

@@ -17,6 +17,7 @@ No web framework, no network — pure data assembly over the repos.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -25,6 +26,7 @@ from datetime import date, timedelta
 
 from app.storage.repos import ai_calls as ai_calls_repo
 from app.storage.repos import api_usage as api_usage_repo
+from app.storage.repos import coder_queue as coder_queue_repo
 from app.storage.repos import identities as identities_repo
 from app.storage.repos import job_queue as job_queue_repo
 from app.storage.repos import memories as memories_repo
@@ -193,6 +195,57 @@ def job_queue_overview(conn: sqlite3.Connection, *, limit: int = 20) -> dict:
     ]
     return {
         "total_jobs": sum(by_status.values()),
+        "by_status": by_status,
+        "jobs": jobs,
+    }
+
+
+def coder_queue_overview(conn: sqlite3.Connection, *, limit: int = 20) -> dict:
+    """Coder-lane (feature codegen) status snapshot for the dashboard (P5).
+
+    Status totals + the latest coding requests with the verified skill modules,
+    the validation summary, and any error — so operators can watch the autonomous
+    codegen lane (generate → sandbox-validate → promote inert).
+    """
+    counts = {
+        row["status"]: row["n"]
+        for row in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM coder_queue GROUP BY status"
+        ).fetchall()
+    }
+    by_status = {
+        coder_queue_repo.PENDING: int(counts.get(coder_queue_repo.PENDING, 0)),
+        coder_queue_repo.RUNNING: int(counts.get(coder_queue_repo.RUNNING, 0)),
+        coder_queue_repo.DONE: int(counts.get(coder_queue_repo.DONE, 0)),
+        coder_queue_repo.FAILED: int(counts.get(coder_queue_repo.FAILED, 0)),
+    }
+
+    rows = conn.execute(
+        "SELECT c.job_id, c.status, c.attempts, c.error, c.skill_modules, c.validation, "
+        "       c.updated_at, r.code AS request_code, r.title AS request_title "
+        "FROM coder_queue c "
+        "LEFT JOIN requests r ON r.id = c.request_id "
+        "ORDER BY c.job_id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    jobs = []
+    for row in rows:
+        validation = json.loads(row["validation"]) if row["validation"] else None
+        jobs.append(
+            {
+                "job_id": row["job_id"],
+                "status": row["status"],
+                "attempts": row["attempts"],
+                "error": row["error"],
+                "skill_modules": json.loads(row["skill_modules"]) if row["skill_modules"] else [],
+                "validation_summary": (validation or {}).get("summary"),
+                "updated_at": row["updated_at"],
+                "request_code": row["request_code"],
+                "request_title": row["request_title"],
+            }
+        )
+    return {
+        "total": sum(by_status.values()),
         "by_status": by_status,
         "jobs": jobs,
     }

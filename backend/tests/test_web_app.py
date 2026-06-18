@@ -124,6 +124,19 @@ def test_requests_page_shows_job_queue_attempts_and_error(conn) -> None:
     assert "queue demo" in text
 
 
+def test_requests_page_shows_coder_queue(conn) -> None:
+    from app.storage.repos import coder_queue as cq
+
+    req = requests_repo.create_request(conn, title="feature: build a tool")
+    job = requests_repo.create_job(conn, request_id=req.id, kind="feature", complexity="complex")
+    cq.enqueue(conn, job_id=job.id, request_id=req.id, job_code=req.code, goal="build it")
+    app = create_app(conn)
+    _, _, body = _call(app, "GET", "/requests")
+    text = body.decode("utf-8")
+    assert "Coder Queue" in text
+    assert req.code in text
+
+
 def test_index_auto_refreshes(conn) -> None:
     app = create_app(conn)
     _, _, body = _call(app, "GET", "/")
@@ -235,6 +248,7 @@ def test_api_system(conn) -> None:
     assert "web_search_credits_used_today" in data["usage"]
     assert "web_search_credits_total" in data["usage"]
     assert data["queue"]["total_jobs"] == 1
+    assert "coder_queue" in data
 
 
 def test_api_usage_with_bucket_and_range(conn) -> None:

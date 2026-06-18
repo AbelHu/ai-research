@@ -17,6 +17,7 @@ from app.roles.control import ensure_owner
 from app.roles.execution import card_for_job, execute_planned_job
 from app.storage.db import connect
 from app.storage.migrations import migrate
+from app.storage.repos import coder_queue as coder_queue_repo
 from app.storage.repos import plans as plans_repo
 from app.storage.repos import requests as requests_repo
 from tests.fakes import FakeProvider
@@ -247,50 +248,36 @@ def test_execute_reconstructs_card_when_omitted(conn) -> None:
     assert outcome.plan_id is not None
 
 
-def test_feature_job_generates_inert_skill(conn, tmp_path, monkeypatch) -> None:
-    # A feature job runs its plan AND produces a reusable skill, written inert.
-    from app.skills import codegen
-
-    monkeypatch.setattr(codegen, "GENERATED_ROOT", tmp_path)
+def test_feature_job_enqueues_coder_request(conn) -> None:
+    # A feature job runs its plan, then hands skill generation to the dedicated
+    # coder lane (P4): it enqueues a coding request instead of generating inline.
     ensure_owner(conn)
     req, job, card = _planned_job(conn, kind="feature")
-    generated = json.dumps(
-        {
-            "skill_name": "generated.thing",
-            "module_filename": "thing.py",
-            "code": "x = 1\n",
-            "rationale": "reusable",
-        }
+    advisor = _advisor(conn, [_plan_json("Build"), APPROVE, SEARCH, DONE, APPROVE])
+
+    outcome = execute_planned_job(
+        conn,
+        advisor,
+        job_id=job.id,
+        card=card,
+        delivery_coords={"channel": "telegram", "chat_id": "7", "reply_to_message_id": "3"},
     )
-    # plan → approve → task → approve(phase) → THEN coder.generate_skill.
-    advisor = _advisor(conn, [_plan_json("Build"), APPROVE, SEARCH, DONE, APPROVE, generated])
+
+    assert outcome.status == "completed"
+    assert "skill" in outcome.delivery.lower()  # tells the user a skill is being built
+    # The coding request is queued with linkage + delivery coords for the follow-up.
+    cjob = coder_queue_repo.get(conn, job.id)
+    assert cjob is not None and cjob.status == "pending"
+    assert cjob.job_code == req.code and cjob.goal
+    assert cjob.channel == "telegram" and cjob.chat_id == "7"
+
+
+def test_non_feature_job_does_not_enqueue_coder_request(conn) -> None:
+    ensure_owner(conn)
+    req, job, card = _planned_job(conn)  # kind="task"
+    advisor = _advisor(conn, [_plan_json("Only"), APPROVE, SEARCH, DONE, APPROVE])
 
     outcome = execute_planned_job(conn, advisor, job_id=job.id, card=card)
 
     assert outcome.status == "completed"
-    assert outcome.generated_skill is not None
-    assert outcome.generated_skill.skill_name == "generated.thing"
-    # The delivery tells the user a skill was built but is inactive pending review.
-    assert "generated.thing" in outcome.delivery
-    assert "confirm" in outcome.delivery.lower()
-    # The code is on disk inert (not registered).
-    assert codegen.is_inert(tmp_path, req.code)
-
-
-def test_feature_job_completes_even_if_codegen_fails(conn, tmp_path, monkeypatch) -> None:
-    # Codegen is a non-fatal deliverable: an unparseable skill → job still done.
-    from app.skills import codegen
-
-    monkeypatch.setattr(codegen, "GENERATED_ROOT", tmp_path)
-    ensure_owner(conn)
-    req, job, card = _planned_job(conn, kind="feature")
-    advisor = _advisor(
-        conn,
-        [_plan_json("Build"), APPROVE, SEARCH, DONE, APPROVE, "(not valid json)", "(still bad)"],
-    )
-
-    outcome = execute_planned_job(conn, advisor, job_id=job.id, card=card)
-
-    assert outcome.status == "completed"  # job still completes + reports
-    assert outcome.generated_skill is None  # no code offered
-    assert codegen.get_bundle(tmp_path, req.code) is None
+    assert coder_queue_repo.get(conn, job.id) is None  # no codegen for a plain task

@@ -175,6 +175,37 @@ queue and exits).
 > network, rate-limit, temporary upstream errors) up to `max_job_retries`
 > (`config/policies.yaml`) before marking a job failed.
 
+### Feature jobs: the coder lane
+
+A **feature** job (one whose deliverable is a new reusable skill) doesn't
+generate code inline. The job worker enqueues a **coding request** onto a
+dedicated `coder_queue`, and a separate, more-privileged process — the **coder
+worker** — drains it:
+
+```bash
+../.venv/bin/python -m app.cli.coderworker          # drain forever; Ctrl-C to stop
+../.venv/bin/python -m app.cli.coderworker --once   # drain queued coding requests, then exit
+```
+
+The coder worker runs the agentic loop — **generate → sandbox-validate (import +
+ruff + pytest) → bounded repair → promote inert** — then follows up in chat:
+"built and verified a reusable skill; run `python -m app.cli.confirm <code>` to
+activate it." The generated bundle stays **inert** until you confirm it:
+
+```bash
+../.venv/bin/python -m app.cli.confirm --list        # list generated bundles + status
+../.venv/bin/python -m app.cli.confirm <request-code> # review-confirmed → activate
+../.venv/bin/python -m app.cli.confirm <request-code> --decline   # leave inert
+```
+
+The coder worker needs more local permissions than the job worker (it writes
+files and spawns the validation sandbox), so it runs as its **own process**. For
+stronger isolation install **bubblewrap** (`sudo apt install bubblewrap`) — the
+sandbox then runs each check in a no-network user namespace; without it, the
+sandbox falls back to `resource` limits + a scrubbed env (CPU/wall/file-size caps,
+no memory cap). The coder queue is visible on the dashboard **Requests** page and
+under `GET /api/system` (`coder_queue`).
+
 Open `http://127.0.0.1:8000` in a local browser for the HTML view, or use the
 JSON API directly (handy for scripting/testing). The HTML dashboard
 **auto-refreshes every 10 seconds** so the data stays live without reloading by
@@ -185,7 +216,7 @@ HTML pages (linked from the homepage nav):
 | Page | Purpose |
 |------|---------|
 | `GET /` | homepage with quick system snapshot + links |
-| `GET /requests` | request list with links to `GET /api/requests/<id>` + queue status/attempts/last error |
+| `GET /requests` | request list with links to `GET /api/requests/<id>` + job-queue and coder-queue status/attempts/last error |
 | `GET /memories` | detailed memory table |
 | `GET /usage` | token/credit usage tables |
 | `GET /accounts` | paired/revoked account table |
@@ -195,7 +226,7 @@ HTML pages (linked from the homepage nav):
 | `GET /healthz` | `{"status":"ok"}` liveness probe |
 | `GET /api/requests` | request index (newest first) |
 | `GET /api/requests/<id>` | one request's job→plan→phase→task tree + steps + `ai_calls` |
-| `GET /api/system` | host metrics (CPU/mem/disk) + model usage from `ai_calls` + queue overview (`pending/running/done/failed`, attempts, latest errors) |
+| `GET /api/system` | host metrics (CPU/mem/disk) + model usage from `ai_calls` + job-queue overview + coder-queue overview (`pending/running/done/failed`, skill modules, validation, errors) |
 | `GET /api/usage?bucket=day|week|month&days=N` | aggregated Tavily credits + AI calls/tokens over the last N days/weeks/months |
 | `GET /api/usage?bucket=day|week|month&start=YYYY-MM-DD&end=YYYY-MM-DD` | aggregated Tavily credits + AI calls/tokens over a specific duration |
 | `GET /api/memories` | the active memories (newest first) — kind, summary, preview, importance, confidence, use count, retention, source, last used, expires |

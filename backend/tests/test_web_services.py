@@ -131,6 +131,29 @@ def test_job_queue_overview_includes_attempts_and_errors(conn) -> None:
     assert jobs[job3.id]["request_title"] == req3.title
 
 
+def test_coder_queue_overview_reports_status_and_skills(conn) -> None:
+    from app.storage.repos import coder_queue as cq
+
+    req = requests_repo.create_request(conn, title="feature: add a tool")
+    job = requests_repo.create_job(conn, request_id=req.id, kind="feature", complexity="complex")
+    cq.enqueue(conn, job_id=job.id, request_id=req.id, job_code=req.code, goal="build it")
+    cq.claim_next(conn)
+    cq.mark_done(
+        conn,
+        job.id,
+        skill_modules=["dbl.py"],
+        validation={"summary": "import=ok lint=ok tests=ok", "iterations": 1},
+    )
+
+    overview = services.coder_queue_overview(conn)
+    assert overview["total"] == 1
+    assert overview["by_status"]["done"] == 1
+    row = overview["jobs"][0]
+    assert row["skill_modules"] == ["dbl.py"]
+    assert "import=ok" in row["validation_summary"]
+    assert row["request_code"] == req.code
+
+
 # --- System page: model usage (T10.3) ---------------------------------------
 
 

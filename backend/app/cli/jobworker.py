@@ -88,7 +88,17 @@ def _process_one(
     down the worker — the same resilience the gateway has.
     """
     try:
-        outcome = execute_planned_job(conn, advisor, job_id=job.job_id, user_id=job.user_id)
+        outcome = execute_planned_job(
+            conn,
+            advisor,
+            job_id=job.job_id,
+            user_id=job.user_id,
+            delivery_coords={
+                "channel": job.channel,
+                "chat_id": job.chat_id,
+                "reply_to_message_id": job.reply_to_message_id,
+            },
+        )
         job_queue_repo.mark_done(conn, job.job_id, outcome.delivery or "")
         logger.info("job %s finished: %s", job.job_id, outcome.status)
         _deliver(send, job, outcome.delivery or "")
