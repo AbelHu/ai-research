@@ -22,7 +22,9 @@ from app.skills.registry import REGISTRY
 
 # Skills that reach the public web for research. A coding-domain request works
 # from local context, so these are removed from its allowed set.
-EXTERNAL_RESEARCH_SKILLS = frozenset({"web.search", "web.fetch"})
+EXTERNAL_RESEARCH_SKILLS = frozenset(
+    {"web.search", "web.fetch", "browser.search", "browser.fetch"}
+)
 
 # Domains the Analyzer may assign; "general" is the safe default (all tools).
 CODING = "coding"

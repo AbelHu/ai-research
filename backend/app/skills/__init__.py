@@ -8,6 +8,7 @@ Importing this package triggers ``@skill`` registration for every skill module
 from __future__ import annotations
 
 from app.skills import (  # noqa: F401  (imported for @skill side effects)
+    browser,
     codegen,
     data,
     library,
@@ -21,4 +22,4 @@ from app.skills import (  # noqa: F401  (imported for @skill side effects)
 # fatal to startup.
 codegen.load_active()
 
-__all__ = ["codegen", "data", "library", "memory", "web"]
+__all__ = ["browser", "codegen", "data", "library", "memory", "web"]

@@ -13,11 +13,15 @@
 #   * Installs this repo's backend package in editable mode (no extra deps).
 #   * (Linux, optional) Installs `bubblewrap` for the Coder sandbox if it's
 #     missing - non-fatal; the sandbox falls back to resource limits without it.
+#   * (Opt-in) With --with-browser, also installs Playwright + a Chromium binary
+#     for the browser.* skills. This step is ONLINE and NOT hash-pinned (it
+#     downloads a ~150 MB browser), so it is OFF by default and non-fatal.
 #
 # Usage:
 #   ./scripts/setup-env.sh            # auto: offline if wheelhouse exists
 #   ./scripts/setup-env.sh --offline  # require the wheelhouse; fail if missing
 #   ./scripts/setup-env.sh --online   # ignore the wheelhouse; fetch from PyPI
+#   ./scripts/setup-env.sh --with-browser  # also install Playwright + Chromium (online)
 #
 # Prerequisites: python3 (>=3.10) with the stdlib `venv` module
 # (on Debian/Ubuntu: `sudo apt install python3-venv`).
@@ -34,10 +38,12 @@ WHEELHOUSE="$REPO_ROOT/vendor/wheels"
 LOCK="$REPO_ROOT/backend/requirements.lock"
 
 MODE="auto"
+WITH_BROWSER=0
 for arg in "$@"; do
   case "$arg" in
     --offline) MODE="offline" ;;
     --online) MODE="online" ;;
+    --with-browser) WITH_BROWSER=1 ;;
     -h | --help)
       # Print the leading comment block (usage), minus the shebang, stopping
       # at the first non-comment line.
@@ -157,6 +163,43 @@ ensure_bubblewrap() {
   fi
 }
 ensure_bubblewrap
+
+# --- optional: headless-browser skill deps (opt-in; NOT offline) -------------
+# The browser.* skills (app/skills/browser.py) drive headless Chromium via
+# Playwright. This is OPTIONAL and OFF BY DEFAULT because it breaks the
+# offline/hash-pinned guarantee: it installs an unpinned PyPI package and then
+# downloads a ~150 MB Chromium binary from Microsoft's CDN. Enable it with
+# `--with-browser`. Failures here are warnings, never setup errors.
+install_browser() {
+  [[ "$WITH_BROWSER" == "1" ]] || return 0
+
+  echo "==> Installing headless-browser support (Playwright + Chromium) [--with-browser]"
+  echo "    note: this step is online and NOT hash-pinned (it downloads a browser binary)."
+  if ! "$VENV_PY" -m pip install --disable-pip-version-check -e "$REPO_ROOT/backend[browser]"; then
+    echo "    [warn] could not install the 'browser' extra (Playwright); skipping."
+    return 0
+  fi
+  if ! "$VENV_PY" -m playwright install chromium; then
+    echo "    [warn] 'playwright install chromium' failed; re-run:"
+    echo "           $VENV_PY -m playwright install chromium"
+    return 0
+  fi
+  # Chromium also needs system shared libraries (libnss3, libnspr4, libasound2,
+  # …). `playwright install-deps` installs them via the OS package manager,
+  # which needs root: run it directly when already root, else try non-interactive
+  # sudo, else print the manual command so the user can finish it.
+  local deps=("$VENV_PY" -m playwright install-deps chromium)
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "${deps[@]}" || echo "    [warn] install-deps failed; install Chromium's system libs manually."
+  elif command -v sudo >/dev/null 2>&1 && sudo -n "${deps[@]}" >/dev/null 2>&1; then
+    echo "    installed Chromium's system libraries."
+  else
+    echo "    [warn] Chromium also needs system libraries. Finish with:"
+    echo "           sudo ${deps[*]}"
+  fi
+  echo "    browser.search / browser.fetch are usable once the system libs above are present."
+}
+install_browser
 
 echo
 echo "Done. Next steps (from the repo root):"

@@ -16,6 +16,12 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
 ]
+# Headless-browser skills (app/skills/browser.py). Optional: install with
+#   pip install -e '.[browser]' && playwright install chromium
+# so the offline, hash-pinned core never has to carry a browser binary.
+browser = [
+    "playwright>=1.40",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
