@@ -2,7 +2,8 @@
 
 For a clear simple ask the Junior Worker handles it end-to-end:
 
-  1. run **`memory.search`** through the skill runtime (records a `steps` row);
+  1. gather context: run **`memory.search`**; a *research* ask (or one memory
+     can't answer) also searches the web **browser-first, then `web.search`**;
   2. draft a **validated** answer from the hits via the advisor (`Advisor.answer`)
      — the draft must carry ≥1 citation and any cited URL is verified (§7.1);
   3. emit `ask_done` to the Boss carrying the answer.
@@ -14,6 +15,7 @@ forms the envelope (AI stays out of the control path).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -29,14 +31,21 @@ from app.skills.registry import catalog
 from app.skills.runtime import InvalidParams, UnknownSkill
 from app.storage.repos import memories as memories_repo
 
+logger = logging.getLogger("app.roles.junior")
+
 # The Junior reads memory + read-only web/data tools; it never writes.
 _JUNIOR_PERMISSIONS = frozenset({"memory.read", "web.read", "data.read"})
 
-# Read-only tools the Junior may call to gather live/web context when local
-# memory has nothing. `web.search` is offered only when configured (a Tavily
-# key), so a key-free machine still gets `data.weather` + `web.fetch`.
-_RESEARCH_TOOLS_BASE = ("data.weather", "web.fetch")
+# Read-only tools the Junior may call to gather live/web context. A web *search*
+# goes browser-first (the keyless headless browser) then falls back to
+# `web.search` (Tavily, metered) — see `_research`. `browser.search` is always
+# available; `web.search` is added only when a Tavily key is configured.
+_RESEARCH_TOOLS_BASE = ("data.weather", "web.fetch", "browser.search")
 _MAX_RESEARCH_STEPS = 2
+
+# The skills that perform a web *search* (vs. fetching a known URL or a
+# structured data source). A search is run browser-first, then web-fallback.
+_SEARCH_SKILLS = frozenset({"browser.search", "web.search"})
 
 # Fields of a memory hit safe to show the model. Internal identifiers (the DB
 # `id`) and lifecycle bookkeeping (`state`, `use_count`, TTL fields) are kept out
@@ -96,7 +105,7 @@ def _finding_from_result(skill_name: str, value) -> list[dict]:
         return [
             {"ref": data.get("source_url"), "title": f"Weather forecast for {loc}", "content": body}
         ]
-    if skill_name == "web.search":
+    if skill_name in ("web.search", "browser.search"):
         findings: list[dict] = []
         if data.get("answer"):
             findings.append(
@@ -156,6 +165,29 @@ def _store_research_finding(
         pass
 
 
+def _search_browser_first(conn, ctx: SkillContext, params: dict, *, allowed: set[str]):
+    """Run a web search browser-first, falling back to ``web.search`` (§6A).
+
+    Returns ``(findings, skill_used)``. The keyless headless browser
+    (``browser.search``) is tried first; the metered ``web.search`` (Tavily) runs
+    only if the browser yields nothing — so search credits are spent solely as a
+    fallback. Either skill is skipped if the domain gate didn't allow it.
+    """
+    query = str(params.get("query") or "")
+    max_results = params.get("max_results", 5)
+    for skill in ("browser.search", "web.search"):
+        if skill not in allowed:
+            continue
+        try:
+            result = runtime.execute(skill, {"query": query, "max_results": max_results}, ctx)
+        except (UnknownSkill, InvalidParams, PermissionDenied):
+            continue
+        findings = _finding_from_result(skill, result.value) if result.value else []
+        if findings:
+            return findings, skill
+    return [], None
+
+
 def _research(
     conn,
     advisor: Advisor,
@@ -196,20 +228,27 @@ def _research(
             break
         if action.done or action.skill not in allowed:
             break
-        try:
-            result = runtime.execute(action.skill, action.params, ctx)
-        except (UnknownSkill, InvalidParams, PermissionDenied):
-            break
-        new = _finding_from_result(action.skill, result.value) if result.value else []
+        # A *search* runs browser-first then web (deterministic, §6A); any other
+        # read tool (data.weather, web.fetch) runs as the model proposed it.
+        if action.skill in _SEARCH_SKILLS:
+            new, used = _search_browser_first(conn, ctx, action.params, allowed=allowed)
+        else:
+            try:
+                result = runtime.execute(action.skill, action.params, ctx)
+            except (UnknownSkill, InvalidParams, PermissionDenied):
+                break
+            new = _finding_from_result(action.skill, result.value) if result.value else []
+            used = action.skill
         if new:
             findings.extend(new)
             # Store each finding as a short-lived memory so follow-ups can reuse
             # the data without re-fetching (temporary session cache).
             for finding in new:
-                _store_research_finding(conn, finding, action.skill, memory_user_id, text)
+                _store_research_finding(conn, finding, used, memory_user_id, text)
+            logger.info("junior research used %s — %d finding(s)", used, len(new))
             # One good finding answers a simple ask — stop rather than spending
-            # another (possibly metered, e.g. web.search) call. Multi-source
-            # gathering is the planned-job path, not the fast simple-ask path.
+            # another (possibly metered) call. Multi-source gathering is the
+            # planned-job path, not the fast simple-ask path.
             break
         # The tool returned nothing useful; note it so the model can try a
         # different tool on the next (bounded) step instead of repeating it.
@@ -234,12 +273,16 @@ def answer_ask(
         job_id=job_id,
     )
     search = runtime.execute("memory.search", {"query": card["text"], "limit": search_limit}, ctx)
-    hits = _hits_for_model(search.value.hits)
+    memory_hits = _hits_for_model(search.value.hits)
 
-    # When local memory has nothing relevant, gather live/web context (§6A) so a
-    # question needing current data (weather, etc.) can still be answered + cited.
-    if not hits:
-        hits = _research(
+    # A `research`-domain ask needs current/external info, so it ALWAYS looks
+    # outward (browser-first, then web) instead of trusting the local memory
+    # cache — that cache is a within-session reuse optimization, not a substitute
+    # for a fresh lookup on a new question, and it may hold unrelated findings.
+    # Other asks research only when memory turned up nothing.
+    domain = card.get("domain", "general")
+    if domain == "research" or not memory_hits:
+        findings = _research(
             conn,
             advisor,
             card["text"],
@@ -247,8 +290,12 @@ def answer_ask(
             request_id=card["request_id"],
             job_id=job_id,
             memory_user_id=user_id,
-            domain=card.get("domain", "general"),
+            domain=domain,
         )
+        # Fresh findings lead; fall back to memory hits if research found nothing.
+        hits = findings or memory_hits
+    else:
+        hits = memory_hits
 
     try:
         draft: AnswerDraft | None = advisor.answer(
