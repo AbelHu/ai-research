@@ -12,18 +12,43 @@ the raw text can't break the match or inject syntax.
 from __future__ import annotations
 
 import sqlite3
+import string
 
 from app.storage.repos.memories import Memory
+
+# Common function words carry no topic signal. If they were kept, an OR-of-terms
+# match would fire on any memory that merely contains "of"/"in"/"a" — so an
+# unrelated query ("history of rome") would recall unrelated memories. Dropping
+# them keeps recall to the meaningful terms.
+_STOPWORDS = frozenset(
+    {
+        "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or", "but",
+        "is", "are", "was", "were", "be", "been", "being", "am", "i", "you", "he",
+        "she", "it", "we", "they", "this", "that", "these", "those", "my", "your",
+        "our", "their", "its", "what", "which", "who", "whom", "whose", "how",
+        "when", "where", "why", "do", "does", "did", "can", "could", "would",
+        "should", "will", "with", "as", "by", "from", "into", "me", "us", "some",
+        "any", "please", "tell", "want", "about", "give", "show", "find", "get",
+        "there", "here", "if", "so", "than", "then", "out",
+    }
+)
+
+
+def _meaningful(token: str) -> bool:
+    """A token is meaningful if, stripped of punctuation, it's >1 char + not a stopword."""
+    core = token.lower().strip(string.punctuation)
+    return len(core) > 1 and core not in _STOPWORDS
 
 
 def _safe_match_query(query: str) -> str | None:
     """Build a safe FTS5 MATCH string: ``"t1" OR "t2" ...`` (None if no terms).
 
-    Each whitespace token is wrapped in double quotes (a phrase), with internal
-    quotes doubled, so FTS5 special characters in user text are treated as
-    literals rather than operators.
+    Stopwords and one-character tokens are dropped so recall keys on the query's
+    *meaningful* terms, not function words. Each remaining token is wrapped in
+    double quotes (a phrase), with internal quotes doubled, so FTS5 special
+    characters in user text are treated as literals rather than operators.
     """
-    tokens = query.split()
+    tokens = [tok for tok in query.split() if _meaningful(tok)]
     if not tokens:
         return None
     quoted = [f'"{tok.replace(chr(34), chr(34) * 2)}"' for tok in tokens]

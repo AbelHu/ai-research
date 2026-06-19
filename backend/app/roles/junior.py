@@ -16,9 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 
 import app.skills  # noqa: F401  -- ensure @skill registration (memory/web/data)
 from app.advisor.schemas import AnswerDraft
@@ -29,7 +27,6 @@ from app.skills.context import SkillContext
 from app.skills.policy import PermissionDenied
 from app.skills.registry import catalog
 from app.skills.runtime import InvalidParams, UnknownSkill
-from app.storage.repos import memories as memories_repo
 
 logger = logging.getLogger("app.roles.junior")
 
@@ -127,44 +124,6 @@ def _finding_from_result(skill_name: str, value) -> list[dict]:
     return []
 
 
-def _store_research_finding(
-    conn: sqlite3.Connection,
-    finding: dict,
-    skill_name: str,
-    user_id: int | None,
-    query: str,
-) -> None:
-    """Store a research finding as a short-lived memory for reuse in follow-ups.
-
-    Each fetched result (tide data, weather, web snippet, etc.) is persisted with
-    retention_class='short' so a follow-up like "when is high tide?" can reuse the
-    data without re-fetching.
-    """
-    try:
-        # Extract entity_key from finding or query for deduplication
-        url_ref = finding.get("ref", "")
-        entity_key = f"{skill_name}:{url_ref}" if url_ref else f"{skill_name}:{query[:50]}"
-
-        # Expire in 24 hours (short-lived session cache)
-        expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat() + "Z"
-
-        memories_repo.create_memory(
-            conn,
-            content=finding.get("content", ""),
-            summary=finding.get("title", "")[:200],
-            user_id=user_id,
-            kind="research",
-            entity_key=entity_key,
-            importance=0.7,  # Medium importance; user asked for it
-            retention_class="short",
-            confidence=0.8,
-            expires_at=expires_at,
-            source_ref=url_ref,
-        )
-    except Exception:  # noqa: BLE001 - research storage must never block answering
-        pass
-
-
 def _search_browser_first(conn, ctx: SkillContext, params: dict, *, allowed: set[str]):
     """Run a web search browser-first, falling back to ``web.search`` (§6A).
 
@@ -196,7 +155,6 @@ def _research(
     *,
     request_id: int,
     job_id: int,
-    memory_user_id: int | None,
     domain: str = "general",
 ) -> list[dict]:
     """Bounded read-tool loop: gather web/live context when memory had nothing (§6A).
@@ -241,10 +199,6 @@ def _research(
             used = action.skill
         if new:
             findings.extend(new)
-            # Store each finding as a short-lived memory so follow-ups can reuse
-            # the data without re-fetching (temporary session cache).
-            for finding in new:
-                _store_research_finding(conn, finding, used, memory_user_id, text)
             logger.info("junior research used %s — %d finding(s)", used, len(new))
             # One good finding answers a simple ask — stop rather than spending
             # another (possibly metered) call. Multi-source gathering is the
@@ -289,7 +243,6 @@ def answer_ask(
             ctx,
             request_id=card["request_id"],
             job_id=job_id,
-            memory_user_id=user_id,
             domain=domain,
         )
         # Fresh findings lead; fall back to memory hits if research found nothing.

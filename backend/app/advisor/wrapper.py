@@ -36,7 +36,7 @@ from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from app.advisor.citations import UrlVerifier, http_url_exists, unresolved_citation_urls
+from app.advisor.citations import UrlVerifier, unresolved_citation_urls, verify_url_exists
 from app.advisor.providers import AIProvider, CompletionRequest, CompletionResponse
 from app.advisor.redaction import redact_text
 from app.advisor.schemas import (
@@ -172,7 +172,7 @@ class Advisor:
     templates_dir: Path | None = None
     # Cited-URL existence check (anti-hallucination, §7.1). Injectable so tests
     # run offline; defaults to the real, SSRF-guarded HTTP verifier.
-    verify_url: UrlVerifier = http_url_exists
+    verify_url: UrlVerifier = verify_url_exists
     # Whether to run that check at all. Defaults from the `verify_citation_urls`
     # policy knob (default on) so it can be disabled in config where our
     # deterministic fetch is blocked by anti-crawler defenses (§7.1).

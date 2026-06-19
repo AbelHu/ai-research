@@ -176,57 +176,6 @@ def test_junior_skips_research_when_memory_has_hits(conn, monkeypatch) -> None:
     assert skills_run == ["memory.search"]  # no research tools ran
 
 
-def test_junior_stores_research_findings_as_temporary_memories(conn, monkeypatch) -> None:
-    # When research finds live data (weather, web fetch, etc.), it should be
-    # stored as a short-lived memory so follow-up questions can reuse it.
-    from app.storage.repos import memories as memories_repo
-
-    monkeypatch.setattr(
-        data, "_get_json", lambda url, params, *, timeout: GEO if "geocoding" in url else FORECAST
-    )
-
-    drafter = FakeProvider([ANSWER])
-    providers = {"planner": FakeProvider([WEATHER_ACTION, WEATHER_ACTION]), "drafter": drafter}
-    advisor = Advisor(
-        resolve_provider=lambda role: providers[role], conn=conn, verify_url=lambda _u: True
-    )
-
-    req = requests_repo.create_request(conn, title="weather this weekend in Sydney")
-    job = requests_repo.create_job(conn, request_id=req.id, kind="ask", complexity="simple")
-    card = {
-        "request_id": req.id,
-        "request_code": req.code,
-        "title": req.title,
-        "text": "What is the weather this weekend in Sydney?",
-        "append": False,
-    }
-
-    result = junior.answer_ask(conn, advisor, card, user_id=None, job_id=job.id)
-
-    # Research ran and produced an answer.
-    assert result.answer is not None
-    assert "Sydney" in result.answer.answer
-
-    # The research finding was stored as a short-lived memory with kind='research'.
-    all_memories = memories_repo.search_memories(conn, "Sydney", limit=100)
-    research_memories = [m for m in all_memories if m.kind == "research"]
-    assert len(research_memories) > 0, "Research finding should be stored as a memory"
-
-    # Verify the memory has the right properties (short-lived, confidence, etc).
-    mem = research_memories[0]
-    assert mem.retention_class == "short", "Research should be stored as short-lived"
-    assert mem.importance == 0.7, "Research findings should have moderate importance"
-    assert mem.confidence == 0.8, "Research should have high confidence"
-    assert "Sydney" in mem.content or "Sydney" in (mem.summary or "")
-    assert mem.expires_at is not None, "Research memory should have an expiry time"
-    assert mem.source_ref is not None, "Research memory should have a source URL"
-
-    # On a follow-up, the stored memory can be found instead of re-fetching.
-    # Follow-up reuse marker: source ref + entity key are present for lookup/dedup.
-    assert mem.source_ref == "https://open-meteo.com/"
-    assert mem.entity_key.startswith("data.weather:")
-
-
 def _research_card(conn):
     req = requests_repo.create_request(conn, title="best restaurants in Sydney")
     job = requests_repo.create_job(conn, request_id=req.id, kind="ask", complexity="simple")

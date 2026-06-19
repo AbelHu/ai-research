@@ -107,6 +107,73 @@ def is_public_fetch_url(url: str) -> bool:
     return bool(host and _resolves_to_public_only(host))
 
 
+def _http_reach(url: str, *, timeout: float) -> str:
+    """One HTTP reachability probe → ``exists`` | ``absent`` | ``blocked`` | ``unreachable``.
+
+    * ``exists``      — the server returned success/redirect (<400).
+    * ``absent``      — the server returned 404/410 (the resource is gone).
+    * ``blocked``     — an auth/anti-bot/method/rate (401/403/405/429) or 5xx
+      status: the host is real but won't serve an automated client.
+    * ``unreachable`` — no HTTP response at all (DNS failure, refused, timeout).
+    """
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            resp = client.head(url)
+            if resp.status_code in (401, 403, 405, 429) or resp.status_code >= 500:
+                resp = client.get(url)  # some hosts reject HEAD; a GET may differ
+            code = resp.status_code
+    except httpx.HTTPError:
+        return "unreachable"
+    if code in (404, 410):
+        return "absent"
+    if code < 400:
+        return "exists"
+    return "blocked"
+
+
+def _browser_reach(url: str) -> str:
+    """Reachability probe via the headless browser (real fingerprint, renders JS)."""
+    try:
+        from app.skills.browser import _render_page
+    except ImportError:  # pragma: no cover - the browser module is always importable
+        return "unreachable"
+    try:
+        page = _render_page(url)
+    except Exception:  # noqa: BLE001 - BrowserUnavailable or any navigation error
+        return "unreachable"
+    code = page.status
+    if code in (404, 410):
+        return "absent"
+    if code is None or code < 400:
+        return "exists"
+    return "blocked"
+
+
+def verify_url_exists(url: str, *, timeout: float = 10.0) -> bool:
+    """Whether a cited URL is real — SSRF-guarded, HTTP-first, browser-fallback.
+
+    A URL counts as existing unless there is positive evidence it does not. A
+    server that answers — **even an anti-bot/auth wall** (401/403/429) — proves
+    the host is real, so only a 404/410 or a host unreachable by BOTH a plain
+    HTTP request AND the headless browser is treated as non-existent. This stops
+    false "broken citation" warnings for real sites (e.g. TripAdvisor) that block
+    automated HTTP but open fine in a browser.
+
+    Performs network I/O and is therefore never exercised in the offline test
+    suite (tests inject a fake verifier).
+    """
+    if not is_public_fetch_url(url):
+        return False
+    http = _http_reach(url, timeout=timeout)
+    if http in ("exists", "blocked"):
+        return True
+    if http == "absent":
+        return False
+    # 'unreachable' over plain HTTP — a real browser may still reach it (some
+    # hosts reject non-browser TLS/HTTP fingerprints at the connection level).
+    return _browser_reach(url) in ("exists", "blocked")
+
+
 def unresolved_citation_urls(citations: Iterable[Source], verify: UrlVerifier) -> list[str]:
     """Return the provided citation URLs that ``verify`` reports as non-existent.
 

@@ -72,3 +72,18 @@ def test_special_characters_do_not_break_query(conn) -> None:
 def test_empty_query_returns_nothing(conn) -> None:
     memories_repo.create_memory(conn, content="something")
     assert keyword_search(conn, "   ") == []
+
+
+def test_stopword_only_overlap_does_not_match(conn) -> None:
+    # A memory that shares only a function word ("of") with the query must NOT be
+    # recalled — otherwise unrelated cached snippets pollute unrelated answers
+    # (the AUD-currency-in-every-answer bug).
+    memories_repo.create_memory(conn, content="latest exchange rates of foreign currencies")
+    assert keyword_search(conn, "history of rome") == []
+    # A meaningful shared term still matches.
+    assert len(keyword_search(conn, "exchange rates")) == 1
+
+
+def test_all_stopword_query_matches_nothing(conn) -> None:
+    memories_repo.create_memory(conn, content="the capital of France is Paris")
+    assert keyword_search(conn, "what is the") == []
