@@ -53,6 +53,13 @@ class MemoryPolicy(BaseModel):
     drop_importance_max: float = Field(default=0.5, ge=0, le=1)
     # A 'short' item used at least this many times is promoted to 'long'.
     promote_use_count: int = Field(default=5, ge=1)
+    # Closed-request library folders quiet for at least this many days have their
+    # artifacts zipped (final report kept readable) to save storage. 0 disables.
+    compact_library_after_days: int = Field(default=30, ge=0)
+    # Reading a committed library folder refreshes its access clock at most once
+    # per this many hours (relatime-style throttle — avoids a write per read).
+    # 0 refreshes on every read.
+    library_access_refresh_hours: int = Field(default=24, ge=0)
 
 
 class Policies(BaseModel):

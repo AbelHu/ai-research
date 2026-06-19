@@ -42,6 +42,7 @@ from dotenv import load_dotenv
 from app.advisor.providers import MissingCredentialError
 from app.cli.coderworker import serve_coder_jobs
 from app.cli.jobworker import serve_jobs
+from app.cli.schedworker import serve_schedules
 from app.cli.telegram import build_bot, serve
 from app.config.settings import REPO_ROOT, get_settings, load_models_config
 from app.runlog import setup_run_logging
@@ -147,6 +148,28 @@ def _run_coderworker(db_path: Path) -> None:
             conn.close()
 
 
+def _run_scheduler(db_path: Path) -> None:
+    """Background-thread target: own connection + the periodic scheduler loop.
+
+    Runs deterministic periodic work — the Librarian's daily memory-maintenance
+    sweep (TTL drop/archive/promote), and future proactive generators. No model
+    or chat is involved, so it runs regardless of the bot. Its own SQLite
+    connection shares the WAL database; any failure is logged and ends the thread
+    without taking down the web app.
+    """
+    conn = None
+    try:
+        conn = connect(db_path)
+        migrate(conn)
+        logger.info("background scheduler started")
+        serve_schedules(conn)
+    except Exception as exc:  # noqa: BLE001 - keep the web app alive regardless
+        logger.error("scheduler stopped: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.cli.web",
@@ -179,6 +202,12 @@ def main(argv: list[str] | None = None) -> int:
         # schema already in place (its migrate() is then an idempotent no-op).
         migrate(conn)
 
+        # The periodic scheduler (Librarian memory maintenance, etc.) is pure
+        # local DB work, so it runs regardless of whether the bot is configured.
+        threading.Thread(
+            target=_run_scheduler, args=(db_path,), name="scheduler", daemon=True
+        ).start()
+
         settings = get_settings()
         if _bot_enabled(settings, no_bot=args.no_bot):
             threading.Thread(
@@ -190,11 +219,14 @@ def main(argv: list[str] | None = None) -> int:
             threading.Thread(
                 target=_run_coderworker, args=(db_path,), name="coder-worker", daemon=True
             ).start()
-            print("[ok]   Telegram gateway + job worker + coder worker starting in the background.")
+            print(
+                "[ok]   Telegram gateway + job worker + coder worker + scheduler "
+                "starting in the background."
+            )
         elif args.no_bot:
-            print("[ok]   --no-bot: serving the dashboard only.")
+            print("[ok]   --no-bot: serving the dashboard + scheduler only.")
         else:
-            print("[warn] TELEGRAM_BOT_TOKEN not set — dashboard only (no Telegram gateway).")
+            print("[warn] TELEGRAM_BOT_TOKEN not set — dashboard + scheduler only (no gateway).")
 
         app = create_app(conn)
         with make_server(args.host, args.port, app) as httpd:

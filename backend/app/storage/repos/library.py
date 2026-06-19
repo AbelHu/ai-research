@@ -10,6 +10,24 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
+
+
+def _fmt(dt: datetime) -> str:
+    """Format as the SQLite ``datetime('now')`` shape ('YYYY-MM-DD HH:MM:SS', UTC)."""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Coerce to aware-UTC (a naive value is treated as already-UTC, per convention)."""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def _parse_utc(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def create_final_report(
@@ -114,6 +132,44 @@ def get_library_index_for_request(conn: sqlite3.Connection, request_id: int) -> 
         "SELECT * FROM library_index WHERE request_id = ? ORDER BY id DESC LIMIT 1",
         (request_id,),
     ).fetchone()
+
+
+def list_library_index(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every library-index mirror row (oldest first) — for the cold-compaction scan."""
+    return conn.execute("SELECT * FROM library_index ORDER BY id").fetchall()
+
+
+def touch_library_index(
+    conn: sqlite3.Connection,
+    request_id: int,
+    *,
+    now: datetime | None = None,
+    refresh: timedelta | None = None,
+) -> bool:
+    """Mark a request's library entry as accessed now (resets the compaction clock).
+
+    With ``refresh`` set this is a relatime-style throttle: the write is skipped
+    (returning ``False``) when the stored ``last_used_at`` is younger than
+    ``refresh``, so a read-heavy burst costs at most one write per window. With
+    ``refresh`` ``None`` (an explicit revive) it always writes. Returns whether
+    the timestamp was updated.
+    """
+    moment = _as_utc(now or datetime.now(tz=timezone.utc))
+    if refresh is not None:
+        row = conn.execute(
+            "SELECT last_used_at FROM library_index WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+        if row is not None and row["last_used_at"]:
+            last = _parse_utc(row["last_used_at"])
+            if last is not None and moment - last < refresh:
+                return False
+    with conn:
+        conn.execute(
+            "UPDATE library_index SET last_used_at = ? WHERE request_id = ?",
+            (_fmt(moment), request_id),
+        )
+    return True
 
 
 def delete_library_index_for_request(conn: sqlite3.Connection, request_id: int) -> int:
