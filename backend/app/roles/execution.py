@@ -227,13 +227,20 @@ def execute_planned_job(
                     delivery=delivery,
                 )
 
+    # A feature job's real deliverable is generated later in the dedicated coder
+    # lane (step 6), which sandbox-validates it (import + lint + the model's own
+    # tests). The phase-level criteria check below would run BEFORE that code
+    # exists, so it can't meaningfully gate a feature here — the coder's sandbox
+    # validation is the gate. Other job kinds still verify their criteria now.
+    job_kind = requests_repo.get_job(conn, job_id).kind
+
     # 4b) Verify the goal's explicit success criteria before reporting done (P3).
     # Only gates when the plan carried criteria and the policy is on; an unmet
     # check escalates honestly rather than reporting a false completion.
     criteria_note: str | None = None
     stored_plan = plans_repo.get_plan(conn, plan.id)
     criteria = stored_plan.success_criteria if stored_plan else []
-    if criteria and get_policies().verify_success_criteria:
+    if criteria and get_policies().verify_success_criteria and job_kind != "feature":
         verdict = advisor.verify_completion(
             goal=card["text"],
             criteria=criteria,
@@ -269,7 +276,7 @@ def execute_planned_job(
     # coder worker generate → sandbox-validate → promote inert, then deliver a
     # follow-up. The result stays gated on confirmation (`confirm_generated_code`).
     coder_note = ""
-    if requests_repo.get_job(conn, job_id).kind == "feature":
+    if job_kind == "feature":
         coords = delivery_coords or {}
         coder_queue_repo.enqueue(
             conn,

@@ -13,6 +13,7 @@ action, code runs it (AI stays out of the control path).
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
 import app.skills  # noqa: F401  -- ensure @skill registration
@@ -26,6 +27,8 @@ from app.storage.repos import plans as plans_repo
 from app.storage.repos.plans import Phase, PlanTask
 
 _ACTOR = Role.senior_worker
+
+logger = logging.getLogger("app.roles.senior")
 
 # Read-leaning default grant for a worker (the policy gate still enforces it).
 DEFAULT_PERMISSIONS = frozenset({"memory.read", "memory.write", "library.read"})
@@ -126,10 +129,19 @@ def run_task(
             # Prevent infinite loops when the model repeats the same call.
             break
 
-        result = runtime.execute(action.skill, action.params, ctx)
+        seen_actions.add(fingerprint)
+        # A worker acting on an AI-proposed skill must never crash the whole job:
+        # a denied/unknown/invalid or erroring skill is recorded as progress so
+        # the model can adapt or finish, and the task still resolves (§8.4).
+        try:
+            result = runtime.execute(action.skill, action.params, ctx)
+        except Exception as exc:  # noqa: BLE001 - a bad skill call must not kill the job
+            last_skill = action.skill
+            progress += f"Tried {action.skill}; it failed ({type(exc).__name__}: {exc}). "
+            logger.warning("task %s skill %s failed: %s", task.id, action.skill, exc)
+            continue
         last_skill = action.skill
         last_step_id = result.step_id
-        seen_actions.add(fingerprint)
         progress += f"Ran {action.skill}; status={result.status}. "
 
     plans_repo.set_task_status(conn, task.id, "Resolved", actor=_ACTOR)
